@@ -130,13 +130,73 @@ function Run-Mysql {
     return $LASTEXITCODE
 }
 
+# ---- 预检测: MariaDB 服务 + 端口 ----
+Write-Host "`n🔍 预检测: MariaDB 服务 + 端口侦听 ..." -ForegroundColor Cyan
+
+# 1. 检测 MariaDB 服务状态
+$svc = Get-Service -Name "MariaDB" -ErrorAction SilentlyContinue
+if (-not $svc) {
+    # 换名字试 (有些版本叫 MySQL / mariadb)
+    $svc = Get-Service | Where-Object { $_.Name -match "MariaDB|mysql" -and $_.Name -ne "mysqlsvc" } | Select-Object -First 1
+}
+if (-not $svc) {
+    Write-Host "⚠️  未找到 MariaDB 服务" -ForegroundColor Yellow
+    Write-Host "   可能服务名不同, 运行 'Get-Service | findstr Maria' 查看" -ForegroundColor Gray
+} elseif ($svc.Status -ne "Running") {
+    Write-Host "⚠️  MariaDB 服务未运行 (状态: $($svc.Status))" -ForegroundColor Yellow
+    Write-Host "   尝试启动: net start $($svc.Name)" -ForegroundColor Cyan
+    $startOut = & net.exe start $svc.Name 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "✅ MariaDB 服务已启动" -ForegroundColor Green
+    } else {
+        Write-Host "❌ 启动失败: $startOut" -ForegroundColor Red
+    }
+} else {
+    Write-Host "✅ MariaDB 服务运行中" -ForegroundColor Green
+}
+
+# 2. 检测端口是否在听
+$portOpen = & netstat.exe -ano | Select-String ":$DbPort\s.*LISTENING" -ErrorAction SilentlyContinue
+if (-not $portOpen) {
+    Write-Host "⚠️  端口 $DbPort 未在 LISTENING" -ForegroundColor Yellow
+    Write-Host "   MariaDB 默认端口: 3306 (可能你装时改成了别的)" -ForegroundColor Gray
+    Write-Host "   跟其他 DB 共享服务? 试 -DbPort 3306 / 3307 / 13306" -ForegroundColor Gray
+    Write-Host "   查看所有 MySQL 端口: netstat -ano | findstr LISTENING" -ForegroundColor Gray
+} else {
+    Write-Host "✅ 端口 $DbPort 在听" -ForegroundColor Green
+}
+
 # ---- 测试连接 ----
 Write-Host "`n🔍 测试数据库连接 $DbHost`:$DbPort ..." -ForegroundColor Cyan
-$connTest = Run-Mysql @('-h', $DbHost, '-P', "$DbPort", '-u', $DbUser, '-e', 'SELECT VERSION();')
+$connTestOut = & $mysqlExe --default-character-set=utf8mb4 `
+    -h $DbHost -P "$DbPort" -u $DbUser `
+    -e "SELECT VERSION();" 2>&1
+$connTest = $LASTEXITCODE
 if ($connTest -ne 0) {
-    Write-Host "❌ 数据库连接失败，密码错 / 端口错 / 用户不存在" -ForegroundColor Red
-    Write-Host "   常见问题: root 密码为空 → 直接回车重试" -ForegroundColor Yellow
-    Write-Host "   端口不是 3305?  用 -DbPort 3306 (默认 MySQL)" -ForegroundColor Yellow
+    $errMsg = ($connTestOut | Out-String)
+    Write-Host "❌ 数据库连接失败 (退出码 $connTest)" -ForegroundColor Red
+    Write-Host "   $errMsg" -ForegroundColor Gray
+    Write-Host ""
+    # 根据 MySQL 错误码给针对性提示
+    if ($errMsg -match "ERROR 2002 \(HY000\)") {
+        Write-Host "  💡 ERROR 2002 = 服务没起 / 端口没听" -ForegroundColor Yellow
+        Write-Host "     1) 确认 MariaDB 服务已启动: Get-Service MariaDB" -ForegroundColor Yellow
+        Write-Host "     2) 确认端口: netstat -ano | findstr LISTENING" -ForegroundColor Yellow
+        Write-Host "     3) 端口不对? 用 -DbPort 参数: -DbPort 3306 / 3307" -ForegroundColor Yellow
+    } elseif ($errMsg -match "ERROR 1045 \(28000\)") {
+        Write-Host "  💡 ERROR 1045 = 密码错" -ForegroundColor Yellow
+        Write-Host "     1) 密码对吗?  重新输入" -ForegroundColor Yellow
+        Write-Host "     2) 忘了密码? 用 --skip-grant-tables 重置 (网上查教程)" -ForegroundColor Yellow
+    } elseif ($errMsg -match "ERROR 2003") {
+        Write-Host "  💡 ERROR 2003 = 端口错 / 防火墙挡" -ForegroundColor Yellow
+        Write-Host "     1) MariaDB 没听这个端口" -ForegroundColor Yellow
+        Write-Host "     2) Windows 防火墙拦了: 控制面板 → Windows Defender 防火墙 → 允许应用" -ForegroundColor Yellow
+    } elseif ($errMsg -match "ERROR 1049") {
+        Write-Host "  💡 ERROR 1049 = 数据库不存在 (但这是初始化脚本,不应该出现)" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host "  🔧 如果端口不对, 重跑: .\init-db.ps1 -DbPort 3306" -ForegroundColor Cyan
+    Write-Host "  🔧 如果服务没起: net start MariaDB" -ForegroundColor Cyan
     Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
     exit 3
 }
