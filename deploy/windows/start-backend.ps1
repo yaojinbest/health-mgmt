@@ -19,7 +19,8 @@
 param(
     [int]$Port = 8090,
     [string]$ProjectRoot = "..\..",
-    [string]$LogFile = "logs\backend.log"
+    [string]$LogFile = "logs\backend.log",
+    [string]$JavaHome = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,29 +41,85 @@ if (-not (Test-Path $JarPath)) {
     exit 1
 }
 
-# ---- JDK 17 检查 ----
+# ---- JDK 17 检查 (JavaHome 参数 → JAVA_HOME 环境变量 → PATH → 自动搜 10+ 路径) ----
 $javaBin = $null
-if (-not $env:JAVA_HOME) {
-    $jdk17 = Get-Command java -ErrorAction SilentlyContinue
-    if ($jdk17) {
-        Write-Host "⚠️  JAVA_HOME 未设置, 但 java 在 PATH 中, 继续尝试..." -ForegroundColor Yellow
-        $javaBin = $jdk17.Source  # C:\Program Files\Java\jdk-17\bin\java.exe
-    } else {
-        Write-Host "❌ 未检测到 Java, 请安装 JDK 17 并设置 JAVA_HOME" -ForegroundColor Red
-        Write-Host "   推荐: Eclipse Temurin 17 (https://adoptium.net/)" -ForegroundColor Yellow
-        exit 2
+$jdkHome = $null
+
+# 优先级 1: -JavaHome 参数
+if ($JavaHome -and (Test-Path (Join-Path $JavaHome 'bin\java.exe'))) {
+    $jdkHome = $JavaHome
+}
+# 优先级 2: JAVA_HOME 环境变量
+if (-not $jdkHome -and $env:JAVA_HOME -and (Test-Path (Join-Path $env:JAVA_HOME 'bin\java.exe'))) {
+    $jdkHome = $env:JAVA_HOME
+}
+# 优先级 3: PATH 里 java (where.exe)
+if (-not $jdkHome) {
+    $whereOut = & where.exe java 2>$null | Select-Object -First 1
+    if ($whereOut -and (Test-Path $whereOut)) {
+        # 从 java.exe 路径反推 JDK HOME (..\.. 退到 JDK 根目录)
+        $jdkHome = Split-Path -Parent (Split-Path -Parent $whereOut)
     }
-} else {
-    $javaBin = Join-Path $env:JAVA_HOME "bin\java.exe"
-    if (-not (Test-Path $javaBin)) {
-        Write-Host "❌ JAVA_HOME 指向不存在的 bin\java.exe: $javaBin" -ForegroundColor Red
-        exit 2
+}
+# 优先级 4: 自动搜 10+ 常见安装位置
+if (-not $jdkHome) {
+    $candidates = @(
+        "C:\Program Files\Eclipse Adoptium\jdk-17*",
+        "C:\Program Files\Eclipse Adoptium\jdk-21*",
+        "C:\Program Files\AdoptOpenJDK\jdk-17*",
+        "C:\Program Files\AdoptOpenJDK\jdk-21*",
+        "C:\Program Files\Java\jdk-17*",
+        "C:\Program Files\Java\jdk-21*",
+        "C:\Program Files\Zulu\zulu-17*",
+        "C:\Program Files\Zulu\zulu-21*",
+        "C:\Program Files\Microsoft\jdk-17*",
+        "C:\Program Files\Amazon Corretto\jdk17*",
+        "C:\Program Files\BellSoft\LibericaJDK-17*",
+        "C:\Program Files\Semeru\jdk-17*",
+        "C:\Program Files\GraalVM\graalvm-ce-java17*",
+        "D:\Program Files\Eclipse Adoptium\jdk-17*",
+        "D:\tools\jdk-17*",
+        "D:\jdk-17*"
+    )
+    foreach ($p in $candidates) {
+        $found = Get-Item $p -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found -and (Test-Path (Join-Path $found.FullName 'bin\java.exe'))) {
+            $jdkHome = $found.FullName
+            break
+        }
     }
+}
+
+if (-not $jdkHome) {
+    Write-Host "❌ 未检测到 JDK" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  📦 未装 JDK? 推荐安装 Eclipse Temurin 17 (Lombok 兼容):" -ForegroundColor Yellow
+    Write-Host "     https://adoptium.net/temurin/releases/?version=17" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  🛠️  三种修复方法 (任选一):" -ForegroundColor Yellow
+    Write-Host "    1. 装好 JDK 后, 重开 PowerShell (环境变量生效)" -ForegroundColor Yellow
+    Write-Host "    2. 手动指定路径重跑:" -ForegroundColor Yellow
+    Write-Host "       .\start-backend.ps1 -JavaHome 'D:\tools\jdk-17.0.10'" -ForegroundColor Gray
+    Write-Host "    3. 设环境变量后重跑:" -ForegroundColor Yellow
+    Write-Host "       setx JAVA_HOME 'C:\Program Files\Eclipse Adoptium\jdk-17.0.10'" -ForegroundColor Gray
+    Write-Host "       (重开 PowerShell 生效)" -ForegroundColor Gray
+    exit 2
+}
+
+$javaBin = Join-Path $jdkHome "bin\java.exe"
+Write-Host "✅ JDK: $jdkHome" -ForegroundColor Green
+
+# 版本检查 (lombok 兼容性, 推荐 17)
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
     $versionOutput = & $javaBin -version 2>&1 | Select-Object -First 1
-    if ($versionOutput -notmatch '"(\d+)\.(\d+)\.') {
-        Write-Host "❌ 无法解析 Java 版本" -ForegroundColor Red
-        exit 2
-    }
+} finally {
+    $ErrorActionPreference = $prevPref
+}
+if ($versionOutput -notmatch '"(\d+)\.(\d+)\.') {
+    Write-Host "⚠️  无法解析 Java 版本 (不影响启动): $versionOutput" -ForegroundColor Yellow
+} else {
     $major = [int]$Matches[1]
     if ($major -lt 17 -or $major -gt 21) {
         Write-Host "⚠️  Java $major 检测到, 推荐 JDK 17 (Lombok 兼容性)" -ForegroundColor Yellow
