@@ -41,12 +41,33 @@ if (-not (Test-Path $InitSql)) {
 
 # ---- 检查 mysql 客户端 (PATH → 常见安装路径自动搜) ----
 $mysql = $null
+$mysqlExe = ""
+
 if ($MysqlPath -and (Test-Path $MysqlPath)) {
-    $mysql = Get-Item $MysqlPath
+    $mysqlExe = (Get-Item $MysqlPath).FullName
 } else {
-    $mysql = Get-Command mysql -ErrorAction SilentlyContinue
-    if (-not $mysql) {
-        # 自动搜常见安装位置 (MariaDB / MySQL / phpStudy / XAMPP / MySQL Installer)
+    # 1. 优先用 where.exe 拿 PATH 里的实际可执行路径 (避开 Get-Command 在 alias/function 时 .Source 为空的问题)
+    try {
+        $whereOut = & where.exe mysql 2>$null | Select-Object -First 1
+        if ($whereOut -and (Test-Path $whereOut)) {
+            $mysqlExe = (Get-Item $whereOut).FullName
+        }
+    } catch {}
+
+    # 2. where.exe 没找到, 退回到 Get-Command
+    if (-not $mysqlExe) {
+        $cmd = Get-Command mysql -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $mysqlExe = if ($cmd.Source) { $cmd.Source }
+                        elseif ($cmd.Path) { $cmd.Path }
+                        elseif ($cmd.Definition) { $cmd.Definition }
+                        else { "" }
+            if ($mysqlExe -and -not (Test-Path $mysqlExe)) { $mysqlExe = "" }
+        }
+    }
+
+    # 3. 自动搜常见安装位置 (MariaDB / MySQL / phpStudy / XAMPP / MySQL Installer)
+    if (-not $mysqlExe) {
         $candidates = @(
             "C:\Program Files\MariaDB*\bin\mysql.exe",
             "C:\Program Files (x86)\MariaDB*\bin\mysql.exe",
@@ -61,11 +82,11 @@ if ($MysqlPath -and (Test-Path $MysqlPath)) {
         )
         foreach ($p in $candidates) {
             $found = Get-Item $p -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) { $mysql = $found; break }
+            if ($found) { $mysqlExe = $found.FullName; break }
         }
     }
 }
-if (-not $mysql) {
+if (-not $mysqlExe) {
     Write-Host "❌ 未检测到 mysql 命令行客户端" -ForegroundColor Red
     Write-Host ""
     Write-Host "  🔍 已扫描的常见位置:" -ForegroundColor Yellow
@@ -91,7 +112,7 @@ if (-not $mysql) {
     Write-Host "    3. 用 HeidiSQL / Navicat 等 GUI 客户端手动执行 sql/init.sql" -ForegroundColor Yellow
     exit 2
 }
-Write-Host "✅ mysql: $($mysql.Source)" -ForegroundColor Green
+Write-Host "✅ mysql: $mysqlExe" -ForegroundColor Green
 
 # ---- 输入密码 ----
 $rootPwd = Read-Host -AsSecureString "MariaDB root 密码"
@@ -105,7 +126,7 @@ $env:MYSQL_PWD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
 
 function Run-Mysql {
     param([string[]]$Args_)
-    & $mysql.Source --default-character-set=utf8mb4 @Args_
+    & $mysqlExe --default-character-set=utf8mb4 @Args_
     return $LASTEXITCODE
 }
 
@@ -130,7 +151,7 @@ try {
     Write-Host "📦 导入 sql/init.sql 到 $DbName ..." -ForegroundColor Cyan
     $import = Run-Mysql @('-h', $DbHost, '-P', "$DbPort", '-u', $DbUser)
     # 把内容通过管道喂给 mysql
-    Get-Content $tmpSql | & $mysql.Source --default-character-set=utf8mb4 `
+    Get-Content $tmpSql | & $mysqlExe --default-character-set=utf8mb4 `
         -h $DbHost -P "$DbPort" -u $DbUser `
         $DbName 2>&1 | Tee-Object -Variable importOutput | Out-Null
 
