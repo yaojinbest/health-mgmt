@@ -158,7 +158,7 @@ async function loadCharts() {
 
 function renderTrendChart(data) {
   if (!trendChartRef.value) return
-  trendChart = trendChart?.dispose() || trendChart
+  if (trendChart) trendChart.dispose()
   trendChart = echarts.init(trendChartRef.value)
   trendChart.setOption({
     tooltip: { trigger: 'axis' },
