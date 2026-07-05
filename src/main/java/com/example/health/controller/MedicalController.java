@@ -1,10 +1,14 @@
 package com.example.health.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.health.common.AccessService;
 import com.example.health.common.AuthContext;
 import com.example.health.common.AuthUser;
 import com.example.health.common.BusinessException;
+import com.example.health.common.PageRequest;
+import com.example.health.common.PageResult;
 import com.example.health.common.Result;
 import com.example.health.dto.BatchScheduleRequest;
 import com.example.health.entity.*;
@@ -33,6 +37,25 @@ public class MedicalController {
     @GetMapping("/hospitals")
     public Result<List<Hospital>> hospitals() {
         return Result.ok(hospitalService.list());
+    }
+
+    /**
+     * 医院列表 - 分页 (PC Web 桌面端专用)
+     * 路径: GET /api/medical/hospitals/page?page=1&size=20&keyword=杭州
+     */
+    @GetMapping("/hospitals/page")
+    public Result<PageResult<Hospital>> hospitalsPage(@ModelAttribute PageRequest pageRequest) {
+        pageRequest.sanitize();
+        LambdaQueryWrapper<Hospital> wrapper = new LambdaQueryWrapper<>();
+        if (pageRequest.getKeyword() != null && !pageRequest.getKeyword().isBlank()) {
+            String kw = pageRequest.getKeyword();
+            wrapper.and(w -> w.like(Hospital::getName, kw).or().like(Hospital::getAddress, kw));
+        }
+        wrapper.orderByAsc(Hospital::getId);
+        IPage<Hospital> pageResult = hospitalService.page(
+                Page.of(pageRequest.getPage(), pageRequest.getSize()), wrapper);
+        return Result.ok(PageResult.of(pageResult.getRecords(), pageResult.getTotal(),
+                pageRequest.getPage(), pageRequest.getSize()));
     }
 
     @PostMapping("/hospital/save")
@@ -66,6 +89,29 @@ public class MedicalController {
             wrapper.eq(Department::getHospitalId, hospitalId);
         }
         return Result.ok(departmentService.list(wrapper));
+    }
+
+    /**
+     * 科室列表 - 分页 (PC Web 桌面端专用)
+     * 路径: GET /api/medical/departments/page?page=1&size=20&hospitalId=1&keyword=内科
+     */
+    @GetMapping("/departments/page")
+    public Result<PageResult<Department>> departmentsPage(
+            @ModelAttribute PageRequest pageRequest,
+            @RequestParam(required = false) Long hospitalId) {
+        pageRequest.sanitize();
+        LambdaQueryWrapper<Department> wrapper = new LambdaQueryWrapper<>();
+        if (hospitalId != null) {
+            wrapper.eq(Department::getHospitalId, hospitalId);
+        }
+        if (pageRequest.getKeyword() != null && !pageRequest.getKeyword().isBlank()) {
+            wrapper.like(Department::getName, pageRequest.getKeyword());
+        }
+        wrapper.orderByAsc(Department::getId);
+        IPage<Department> pageResult = departmentService.page(
+                Page.of(pageRequest.getPage(), pageRequest.getSize()), wrapper);
+        return Result.ok(PageResult.of(pageResult.getRecords(), pageResult.getTotal(),
+                pageRequest.getPage(), pageRequest.getSize()));
     }
 
     @PostMapping("/department/save")
@@ -129,6 +175,59 @@ public class MedicalController {
             rows.add(row);
         }
         return Result.ok(rows);
+    }
+
+    /**
+     * 医生列表 - 分页 (PC Web 桌面端专用)
+     * 路径: GET /api/medical/doctors/page?page=1&size=20&hospitalId=1&departmentId=1&keyword=张
+     */
+    @GetMapping("/doctors/page")
+    public Result<PageResult<Map<String, Object>>> doctorsPage(
+            @ModelAttribute PageRequest pageRequest,
+            @RequestParam(required = false) Long hospitalId,
+            @RequestParam(required = false) Long departmentId,
+            @RequestParam(required = false) Boolean all) {
+        pageRequest.sanitize();
+
+        LambdaQueryWrapper<Doctor> wrapper = new LambdaQueryWrapper<>();
+        if (hospitalId != null) wrapper.eq(Doctor::getHospitalId, hospitalId);
+        if (departmentId != null) wrapper.eq(Doctor::getDepartmentId, departmentId);
+        if (!Boolean.TRUE.equals(all)) wrapper.eq(Doctor::getStatus, "ACTIVE");
+        if (pageRequest.getKeyword() != null && !pageRequest.getKeyword().isBlank()) {
+            String kw = pageRequest.getKeyword();
+            wrapper.and(w -> w.like(Doctor::getTitle, kw).or().like(Doctor::getSpecialty, kw));
+        }
+        wrapper.orderByAsc(Doctor::getId);
+
+        long total = doctorService.count(wrapper);
+        IPage<Doctor> pageResult = doctorService.page(
+                Page.of(pageRequest.getPage(), pageRequest.getSize()), wrapper);
+
+        Map<Long, String> userNames = sysUserService.list().stream()
+                .collect(Collectors.toMap(SysUser::getId, u -> u.getRealName() != null ? u.getRealName() : u.getUsername(), (a, b) -> a));
+        Map<Long, String> hospitalNames = hospitalService.list().stream()
+                .collect(Collectors.toMap(Hospital::getId, Hospital::getName, (a, b) -> a));
+        Map<Long, String> departmentNames = departmentService.list().stream()
+                .collect(Collectors.toMap(Department::getId, Department::getName, (a, b) -> a));
+
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Doctor doctor : pageResult.getRecords()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", doctor.getId());
+            row.put("userId", doctor.getUserId());
+            row.put("hospitalId", doctor.getHospitalId());
+            row.put("departmentId", doctor.getDepartmentId());
+            row.put("title", doctor.getTitle());
+            row.put("specialty", doctor.getSpecialty());
+            row.put("profile", doctor.getProfile());
+            row.put("status", doctor.getStatus());
+            row.put("doctorName", userNames.getOrDefault(doctor.getUserId(), "医生#" + doctor.getId()));
+            row.put("hospitalName", hospitalNames.getOrDefault(doctor.getHospitalId(), "未知医院"));
+            row.put("departmentName", departmentNames.getOrDefault(doctor.getDepartmentId(), "未知科室"));
+            rows.add(row);
+        }
+
+        return Result.ok(PageResult.of(rows, total, pageRequest.getPage(), pageRequest.getSize()));
     }
 
     @PostMapping("/doctor/save")

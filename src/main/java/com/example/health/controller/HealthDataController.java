@@ -1,9 +1,13 @@
 package com.example.health.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.health.common.AccessService;
 import com.example.health.common.AuthUser;
 import com.example.health.common.BusinessException;
+import com.example.health.common.PageRequest;
+import com.example.health.common.PageResult;
 import com.example.health.common.Result;
 import com.example.health.entity.HealthData;
 import com.example.health.service.HealthDataService;
@@ -52,6 +56,36 @@ public class HealthDataController {
         }
         wrapper.orderByDesc(HealthData::getRecordTime);
         return Result.ok(healthDataService.list(wrapper));
+    }
+
+    /**
+     * 健康数据列表 - 分页 (PC Web 桌面端专用, 2026-07-05 进哥拍板 Q4-B)
+     *
+     * 路径: GET /api/health-data/list/page?page=1&size=20&userId=4
+     */
+    @GetMapping("/list/page")
+    public Result<PageResult<HealthData>> listPage(
+            @ModelAttribute PageRequest pageRequest,
+            @RequestParam(required = false) Long userId) {
+        AuthUser user = accessService.requireLogin();
+        pageRequest.sanitize();
+
+        LambdaQueryWrapper<HealthData> wrapper = new LambdaQueryWrapper<>();
+        List<Long> scopedIds = accessService.scopedPatientIdsForList(user, userId);
+        if (scopedIds != null) {
+            if (scopedIds.isEmpty()) {
+                return Result.ok(PageResult.empty(pageRequest.getPage(), pageRequest.getSize()));
+            }
+            wrapper.in(HealthData::getUserId, scopedIds);
+        }
+        wrapper.orderByDesc(HealthData::getRecordTime);
+
+        IPage<HealthData> pageResult = healthDataService.page(
+                Page.of(pageRequest.getPage(), pageRequest.getSize()),
+                wrapper);
+
+        return Result.ok(PageResult.of(pageResult.getRecords(), pageResult.getTotal(),
+                pageRequest.getPage(), pageRequest.getSize()));
     }
 
     @GetMapping("/chart")

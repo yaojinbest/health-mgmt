@@ -1,10 +1,14 @@
 package com.example.health.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.health.common.AccessService;
 import com.example.health.common.AuthContext;
 import com.example.health.common.AuthUser;
 import com.example.health.common.BusinessException;
+import com.example.health.common.PageRequest;
+import com.example.health.common.PageResult;
 import com.example.health.common.Result;
 import com.example.health.entity.Consultation;
 import com.example.health.entity.ConsultationMessage;
@@ -96,6 +100,79 @@ public class ConsultationController {
             rows.add(row);
         }
         return Result.ok(rows);
+    }
+
+    /**
+     * 咨询会话列表 - 分页 (PC Web 桌面端专用, 2026-07-05 进哥拍板 Q4-B)
+     *
+     * 路径: GET /api/consultations/page?page=1&size=20&userId=X&doctorId=Y&status=OPEN
+     *
+     * 权限: admin 看全部; user 看自己; doctor 看分配给自己的
+     * 搜索: keyword 按 title 模糊查询 (简易版, PC Web 一般用下拉过滤)
+     */
+    @GetMapping("/page")
+    public Result<PageResult<Map<String, Object>>> listPage(
+            @ModelAttribute PageRequest pageRequest,
+            @RequestParam(required = false) Long userId,
+            @RequestParam(required = false) Long doctorId,
+            @RequestParam(required = false) String status) {
+        AuthUser user = accessService.requireLogin();
+        pageRequest.sanitize();
+
+        LambdaQueryWrapper<Consultation> wrapper = new LambdaQueryWrapper<>();
+        if (accessService.isAdmin(user)) {
+            if (userId != null) wrapper.eq(Consultation::getUserId, userId);
+            if (doctorId != null) wrapper.eq(Consultation::getDoctorId, doctorId);
+        } else if (accessService.isUser(user)) {
+            wrapper.eq(Consultation::getUserId, user.getUserId());
+        } else if (accessService.isDoctor(user)) {
+            Long currentDoctorId = accessService.currentDoctorId(user);
+            if (currentDoctorId == null) {
+                throw new BusinessException("未找到医生档案");
+            }
+            wrapper.eq(Consultation::getDoctorId, currentDoctorId);
+        } else {
+            throw new BusinessException("无权查看咨询");
+        }
+        if (status != null && !status.isBlank()) {
+            wrapper.eq(Consultation::getStatus, status);
+        }
+        if (pageRequest.getKeyword() != null && !pageRequest.getKeyword().isBlank()) {
+            wrapper.like(Consultation::getTitle, pageRequest.getKeyword());
+        }
+        wrapper.orderByDesc(Consultation::getCreateTime);
+
+        // 先 count, 再 list (避免分页 + 关联查询的复杂性, PC Web 桌面对实时性不敏感)
+        long total = consultationService.count(wrapper);
+        IPage<Consultation> pageResult = consultationService.page(
+                Page.of(pageRequest.getPage(), pageRequest.getSize()),
+                wrapper);
+
+        Map<Long, String> userNames = sysUserService.list().stream()
+                .collect(Collectors.toMap(SysUser::getId, u -> u.getRealName() != null ? u.getRealName() : u.getUsername(), (a, b) -> a));
+        Map<Long, Doctor> doctorMap = doctorService.list().stream()
+                .collect(Collectors.toMap(Doctor::getId, item -> item, (a, b) -> a));
+
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Consultation item : pageResult.getRecords()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", item.getId());
+            row.put("userId", item.getUserId());
+            row.put("doctorId", item.getDoctorId());
+            row.put("userName", userNames.getOrDefault(item.getUserId(), "未知用户"));
+            Doctor doctor = doctorMap.get(item.getDoctorId());
+            row.put("doctorName", doctor == null ? "未知医生" : doctor.getTitle() + " · " + doctor.getSpecialty());
+            row.put("title", item.getTitle());
+            row.put("status", item.getStatus());
+            row.put("createTime", item.getCreateTime());
+            row.put("followUpTime", item.getFollowUpTime());
+            long messageCount = messageService.count(new LambdaQueryWrapper<ConsultationMessage>()
+                    .eq(ConsultationMessage::getConsultationId, item.getId()));
+            row.put("messageCount", messageCount);
+            rows.add(row);
+        }
+
+        return Result.ok(PageResult.of(rows, total, pageRequest.getPage(), pageRequest.getSize()));
     }
 
     @PostMapping("/message/send")

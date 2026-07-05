@@ -1,9 +1,13 @@
 package com.example.health.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.health.common.AccessService;
 import com.example.health.common.AuthUser;
 import com.example.health.common.BusinessException;
+import com.example.health.common.PageRequest;
+import com.example.health.common.PageResult;
 import com.example.health.common.Result;
 import com.example.health.entity.MedicineRecord;
 import com.example.health.service.MedicineRecordService;
@@ -50,6 +54,45 @@ public class MedicineController {
         }
         wrapper.orderByDesc(MedicineRecord::getCreateTime);
         return Result.ok(medicineRecordService.list(wrapper));
+    }
+
+    /**
+     * 用药记录 - 分页 (PC Web 桌面端专用, 2026-07-05 进哥拍板 Q4-B)
+     *
+     * 路径: GET /api/medicine/list/page?page=1&size=20&userId=4&keyword=阿司&status=ACTIVE
+     */
+    @GetMapping("/list/page")
+    public Result<PageResult<MedicineRecord>> listPage(
+            @ModelAttribute PageRequest pageRequest,
+            @RequestParam(required = false) Long userId,
+            @RequestParam(required = false) String status) {
+        AuthUser user = accessService.requireLogin();
+        pageRequest.sanitize();
+
+        LambdaQueryWrapper<MedicineRecord> wrapper = new LambdaQueryWrapper<>();
+        List<Long> scopedIds = accessService.scopedPatientIdsForList(user, userId);
+        if (scopedIds != null) {
+            if (scopedIds.isEmpty()) {
+                return Result.ok(PageResult.empty(pageRequest.getPage(), pageRequest.getSize()));
+            }
+            wrapper.in(MedicineRecord::getUserId, scopedIds);
+        }
+        if (status != null && !status.isBlank()) {
+            wrapper.eq(MedicineRecord::getStatus, status);
+        }
+        if (pageRequest.getKeyword() != null && !pageRequest.getKeyword().isBlank()) {
+            String kw = pageRequest.getKeyword();
+            wrapper.and(w -> w.like(MedicineRecord::getMedicineName, kw)
+                    .or().like(MedicineRecord::getDosage, kw));
+        }
+        wrapper.orderByDesc(MedicineRecord::getCreateTime);
+
+        IPage<MedicineRecord> pageResult = medicineRecordService.page(
+                Page.of(pageRequest.getPage(), pageRequest.getSize()),
+                wrapper);
+
+        return Result.ok(PageResult.of(pageResult.getRecords(), pageResult.getTotal(),
+                pageRequest.getPage(), pageRequest.getSize()));
     }
 
     @PostMapping("/finish/{id}")
