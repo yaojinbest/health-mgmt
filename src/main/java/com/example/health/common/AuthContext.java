@@ -20,8 +20,11 @@ public final class AuthContext {
 
     public static void requireAdmin() {
         AuthUser user = get();
-        if (user == null || !"ADMIN".equals(user.getRole())) {
-            throw new BusinessException("无权操作，需要管理员权限");
+        if (user == null) {
+            throw new BusinessException(401, "请先登录");
+        }
+        if (!"ADMIN".equals(user.getRole())) {
+            throw new BusinessException(403, "无权操作，需要管理员权限");
         }
     }
 }

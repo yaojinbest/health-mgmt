@@ -15,8 +15,11 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler(BusinessException.class)
-    public Result<Void> handleBusiness(BusinessException exception) {
-        return Result.fail(exception.getMessage());
+    public ResponseEntity<Result<Void>> handleBusiness(BusinessException exception) {
+        int code = exception.getCode();
+        // 业务异常代码 400-499 映射到对应 HTTP 状态, 500+ 走 Result.fail.
+        HttpStatus status = (code >= 400 && code < 500) ? HttpStatus.valueOf(code) : HttpStatus.INTERNAL_SERVER_ERROR;
+        return ResponseEntity.status(status).body(new Result<>(code, exception.getMessage(), null));
     }
 
     @ExceptionHandler({MethodArgumentNotValidException.class, BindException.class})

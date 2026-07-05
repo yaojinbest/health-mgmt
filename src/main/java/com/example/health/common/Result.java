@@ -23,4 +23,13 @@ public class Result<T> {
     public static <T> Result<T> fail(String message) {
         return new Result<>(500, message, null);
     }
+
+    /**
+     * 业务异常专用, 带 HTTP 语义 code (400 / 401 / 403 / 404 / 409).
+     * 区别于 fail(): 区分业务异常 vs 系统异常.
+     * 前端 axios 拦截器根据 code 判断 (401=跳登录, 403=toast 权限不足).
+     */
+    public static <T> Result<T> error(int code, String message) {
+        return new Result<>(code, message, null);
+    }
 }
