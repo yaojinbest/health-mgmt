@@ -115,14 +115,18 @@ if (-not $mysqlExe) {
 Write-Host "✅ mysql: $mysqlExe" -ForegroundColor Green
 
 # ---- 输入密码 ----
-$rootPwd = Read-Host -AsSecureString "MariaDB root 密码"
-$env:MYSQL_PWD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($rootPwd)
-)
-
-# 立刻清 SecureString 内存
-[System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($rootPwd))
-[GC]::Collect()
+$rootPwd = Read-Host -AsSecureString "MariaDB root 密码 (空密码直接回车)"
+if ($rootPwd.Length -eq 0) {
+    Write-Host "  ℹ️  检测到空密码 (装 MariaDB 时没设 root 密码常见)" -ForegroundColor Cyan
+    $env:MYSQL_PWD = ""
+} else {
+    $env:MYSQL_PWD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($rootPwd)
+    )
+    # 立刻清 SecureString 内存
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($rootPwd))
+    [GC]::Collect()
+}
 
 function Run-Mysql {
     param([string[]]$Args_)
@@ -155,14 +159,28 @@ if (-not $svc) {
     Write-Host "✅ MariaDB 服务运行中" -ForegroundColor Green
 }
 
-# 2. 检测端口是否在听
+# 2. 检测端口是否在听 + 自动 fallback (3305 → 3306)
 $portOpen = & netstat.exe -ano | Select-String ":$DbPort\s.*LISTENING" -ErrorAction SilentlyContinue
 if (-not $portOpen) {
     Write-Host "⚠️  端口 $DbPort 未在 LISTENING" -ForegroundColor Yellow
-    Write-Host "   MariaDB 默认端口: 3306 (可能你装时改成了别的)" -ForegroundColor Gray
-    Write-Host "   跟其他 DB 共享服务? 试 -DbPort 3306 / 3307 / 13306" -ForegroundColor Gray
-    Write-Host "   查看所有 MySQL 端口: netstat -ano | findstr LISTENING" -ForegroundColor Gray
-} else {
+    # 自动 fallback: 尝试 3306 / 3307 / 13306
+    foreach ($p in @(3306, 3307, 13306)) {
+        if ($p -eq $DbPort) { continue }
+        $pOpen = & netstat.exe -ano | Select-String ":$p\s.*LISTENING" -ErrorAction SilentlyContinue
+        if ($pOpen) {
+            Write-Host "   🔍 发现端口 $p 在听, 自动切换 -DbPort (原默认 $DbPort 是 application.yml 里配的)" -ForegroundColor Cyan
+            $DbPort = $p
+            $portOpen = $pOpen
+            break
+        }
+    }
+    if (-not $portOpen) {
+        Write-Host "   MariaDB 默认端口: 3306 (可能你装时改成了别的)" -ForegroundColor Gray
+        Write-Host "   跟其他 DB 共享服务? 试 -DbPort 3306 / 3307 / 13306" -ForegroundColor Gray
+        Write-Host "   查看所有 MySQL 端口: netstat -ano | findstr LISTENING" -ForegroundColor Gray
+    }
+}
+if ($portOpen) {
     Write-Host "✅ 端口 $DbPort 在听" -ForegroundColor Green
 }
 
@@ -247,3 +265,14 @@ Write-Host ""
 Write-Host "下一步:" -ForegroundColor Cyan
 Write-Host "   PS> .\start-backend.ps1   # 启动后端" -ForegroundColor White
 Write-Host "   PS> .\start-frontend.ps1  # 启动 H5 (开发模式)" -ForegroundColor White
+Write-Host ""
+# 提醒端口不一致问题
+$appYmlPort = 3305
+if ($DbPort -ne $appYmlPort) {
+    Write-Host "  ⚠️  端口提醒:" -ForegroundColor Yellow
+    Write-Host "   init-db 实际使用的端口: $DbPort" -ForegroundColor Yellow
+    Write-Host "   backend application.yml 配的端口: $appYmlPort" -ForegroundColor Yellow
+    Write-Host "   如果不一致, 后端连不上数据库! 改 src\main\resources\application.yml:" -ForegroundColor Yellow
+    Write-Host "     url: jdbc:mysql://localhost:$DbPort/health_management?..." -ForegroundColor Gray
+    Write-Host "   改完后重新打 jar: mvn package -DskipTests" -ForegroundColor Yellow
+}
