@@ -243,11 +243,14 @@ try {
     Get-Content $InitSql | Out-File -FilePath $tmpSql -Encoding UTF8
 
     Write-Host "📦 导入 sql/init.sql 到 $DbName ..." -ForegroundColor Cyan
+    Write-Host "   (看不到输出别担心, mysql 默认静默模式, 等待 10-30 秒)" -ForegroundColor Gray
     $import = Run-Mysql @('-h', $DbHost, '-P', "$DbPort", '-u', $DbUser)
     # 把内容通过管道喂给 mysql (同样要包 try/finally 避免 WARNING 拋 RemoteException)
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
+        # Tee-Object 同时保存输出到变量 + 输出到控制台 (进哥能看到进度信息)
+        $importOutput = @()
         Get-Content $tmpSql | & $mysqlExe --default-character-set=utf8mb4 `
             -h $DbHost -P "$DbPort" -u $DbUser `
             $DbName 2>&1 | Tee-Object -Variable importOutput | Out-Null
@@ -256,10 +259,13 @@ try {
     }
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "❌ 导入失败, 输出:`n$importOutput" -ForegroundColor Red
+        $errStr = ($importOutput | Out-String)
+        Write-Host "❌ 导入失败 (退出码 $LASTEXITCODE), 输出:`n$errStr" -ForegroundColor Red
         Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
         Remove-Item $tmpSql -Force -ErrorAction SilentlyContinue
         exit 4
+    } else {
+        Write-Host "✅ init.sql 导入成功" -ForegroundColor Green
     }
 } finally {
     Remove-Item $tmpSql -Force -ErrorAction SilentlyContinue
