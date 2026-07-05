@@ -22,7 +22,8 @@ param(
     [int]$DbPort = 3305,
     [string]$DbName = "health_management",
     [string]$DbUser = "root",
-    [string]$ProjectRoot = "..\.."
+    [string]$ProjectRoot = "..\..",
+    [string]$MysqlPath = ""
 )
 
 # UTF-8 BOM 必备 (PowerShell 5.1 中文系统防乱码)
@@ -38,14 +39,59 @@ if (-not (Test-Path $InitSql)) {
     exit 1
 }
 
-# ---- 检查 mysql 客户端 ----
-$mysql = Get-Command mysql -ErrorAction SilentlyContinue
+# ---- 检查 mysql 客户端 (PATH → 常见安装路径自动搜) ----
+$mysql = $null
+if ($MysqlPath -and (Test-Path $MysqlPath)) {
+    $mysql = Get-Item $MysqlPath
+} else {
+    $mysql = Get-Command mysql -ErrorAction SilentlyContinue
+    if (-not $mysql) {
+        # 自动搜常见安装位置 (MariaDB / MySQL / phpStudy / XAMPP / MySQL Installer)
+        $candidates = @(
+            "C:\Program Files\MariaDB*\bin\mysql.exe",
+            "C:\Program Files (x86)\MariaDB*\bin\mysql.exe",
+            "C:\Program Files\MySQL\MySQL Server*\bin\mysql.exe",
+            "C:\Program Files\MySQL\MySQL Server*\bin\mariadb.exe",
+            "D:\Program Files\MariaDB*\bin\mysql.exe",
+            "D:\phpstudy_pro\Extensions\MySQL*\bin\mysql.exe",
+            "C:\xampp\mysql\bin\mysql.exe",
+            "C:\laragon\bin\mysql\mysql-*\bin\mysql.exe",
+            "D:\tools\mysql*\bin\mysql.exe",
+            "D:\tools\mariadb*\bin\mysql.exe"
+        )
+        foreach ($p in $candidates) {
+            $found = Get-Item $p -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $mysql = $found; break }
+        }
+    }
+}
 if (-not $mysql) {
     Write-Host "❌ 未检测到 mysql 命令行客户端" -ForegroundColor Red
-    Write-Host "   请先安装 MariaDB 10+ 或 MySQL 8+，并将 bin 加入 PATH" -ForegroundColor Yellow
-    Write-Host "   下载: https://mariadb.org/download/" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  🔍 已扫描的常见位置:" -ForegroundColor Yellow
+    @(
+        "C:\Program Files\MariaDB*\bin\mysql.exe",
+        "C:\Program Files\MySQL\MySQL Server*\bin\mysql.exe",
+        "D:\phpstudy_pro\Extensions\MySQL*\bin\mysql.exe",
+        "C:\xampp\mysql\bin\mysql.exe",
+        "C:\laragon\bin\mysql\mysql-*\bin\mysql.exe"
+    ) | ForEach-Object { Write-Host "    - $_" -ForegroundColor Gray }
+    Write-Host ""
+    Write-Host "  📦 未装 MySQL/MariaDB? 推荐安装:" -ForegroundColor Yellow
+    Write-Host "    MariaDB 11.x: https://mariadb.org/download/" -ForegroundColor Yellow
+    Write-Host "    MySQL 8.x:    https://dev.mysql.com/downloads/installer/" -ForegroundColor Yellow
+    Write-Host "    XAMPP:        https://www.apachefriends.org/" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  🛠️  三种修复方法 (任选一):" -ForegroundColor Yellow
+    Write-Host "    1. 把 mysql.exe 所在 bin 目录加到 PATH (推荐)" -ForegroundColor Yellow
+    Write-Host "       setx PATH `"$env:PATH;C:\Program Files\MariaDB 11.8\bin`"" -ForegroundColor Gray
+    Write-Host "       (重开 PowerShell 生效)" -ForegroundColor Gray
+    Write-Host "    2. 手动指定路径重跑:" -ForegroundColor Yellow
+    Write-Host "       .\init-db.ps1 -MysqlPath 'D:\tools\mariadb\bin\mysql.exe'" -ForegroundColor Gray
+    Write-Host "    3. 用 HeidiSQL / Navicat 等 GUI 客户端手动执行 sql/init.sql" -ForegroundColor Yellow
     exit 2
 }
+Write-Host "✅ mysql: $($mysql.Source)" -ForegroundColor Green
 
 # ---- 输入密码 ----
 $rootPwd = Read-Host -AsSecureString "MariaDB root 密码"
@@ -59,7 +105,7 @@ $env:MYSQL_PWD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
 
 function Run-Mysql {
     param([string[]]$Args_)
-    & mysql --default-character-set=utf8mb4 @Args_
+    & $mysql.Source --default-character-set=utf8mb4 @Args_
     return $LASTEXITCODE
 }
 
@@ -84,7 +130,7 @@ try {
     Write-Host "📦 导入 sql/init.sql 到 $DbName ..." -ForegroundColor Cyan
     $import = Run-Mysql @('-h', $DbHost, '-P', "$DbPort", '-u', $DbUser)
     # 把内容通过管道喂给 mysql
-    Get-Content $tmpSql | & mysql --default-character-set=utf8mb4 `
+    Get-Content $tmpSql | & $mysql.Source --default-character-set=utf8mb4 `
         -h $DbHost -P "$DbPort" -u $DbUser `
         $DbName 2>&1 | Tee-Object -Variable importOutput | Out-Null
 
