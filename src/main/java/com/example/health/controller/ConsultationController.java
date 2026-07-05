@@ -7,6 +7,7 @@ import com.example.health.common.AccessService;
 import com.example.health.common.AuthContext;
 import com.example.health.common.AuthUser;
 import com.example.health.common.BusinessException;
+import com.example.health.common.CsvExporter;
 import com.example.health.common.PageRequest;
 import com.example.health.common.PageResult;
 import com.example.health.common.Result;
@@ -18,9 +19,11 @@ import com.example.health.service.ConsultationMessageService;
 import com.example.health.service.ConsultationService;
 import com.example.health.service.DoctorService;
 import com.example.health.service.SysUserService;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -297,5 +300,65 @@ public class ConsultationController {
         if (!Boolean.TRUE.equals(info.get("canDelete"))) {
             throw new BusinessException(String.valueOf(info.get("message")));
         }
+    }
+
+    /**
+     * 咨询会话导出 CSV (PC Web 桌面端专用, 2026-07-05 进哥拍板 Q4-B / P2)
+     *
+     * 路径: GET /api/consultations/export?status=OPEN
+     *
+     * 权限: 跟 listPage 一样 (admin 全; user 自己; doctor 自己负责的)
+     */
+    @GetMapping("/export")
+    public void exportCsv(@RequestParam(required = false) Long userId,
+                          @RequestParam(required = false) Long doctorId,
+                          @RequestParam(required = false) String status,
+                          HttpServletResponse response) throws IOException {
+        AuthUser user = accessService.requireLogin();
+
+        LambdaQueryWrapper<Consultation> wrapper = new LambdaQueryWrapper<>();
+        if (accessService.isAdmin(user)) {
+            if (userId != null) wrapper.eq(Consultation::getUserId, userId);
+            if (doctorId != null) wrapper.eq(Consultation::getDoctorId, doctorId);
+        } else if (accessService.isUser(user)) {
+            wrapper.eq(Consultation::getUserId, user.getUserId());
+        } else if (accessService.isDoctor(user)) {
+            Long currentDoctorId = accessService.currentDoctorId(user);
+            if (currentDoctorId == null) {
+                throw new BusinessException("未找到医生档案");
+            }
+            wrapper.eq(Consultation::getDoctorId, currentDoctorId);
+        } else {
+            throw new BusinessException("无权查看咨询");
+        }
+        if (status != null && !status.isBlank()) {
+            wrapper.eq(Consultation::getStatus, status);
+        }
+        wrapper.orderByDesc(Consultation::getCreateTime);
+
+        List<Consultation> rows = consultationService.list(wrapper);
+        Map<Long, String> userNames = sysUserService.list().stream()
+                .collect(Collectors.toMap(SysUser::getId, u -> u.getRealName() != null ? u.getRealName() : u.getUsername(), (a, b) -> a));
+        Map<Long, Doctor> doctorMap = doctorService.list().stream()
+                .collect(Collectors.toMap(Doctor::getId, item -> item, (a, b) -> a));
+
+        CsvExporter.export(response, "咨询会话_" + LocalDateTime.now(),
+                new String[]{"ID", "用户ID", "用户姓名", "医生ID", "医生姓名", "标题", "状态", "创建时间", "复诊时间"},
+                rows,
+                r -> {
+                    Doctor d = doctorMap.get(r.getDoctorId());
+                    String doctorName = d == null ? "未知医生" : d.getTitle() + " · " + d.getSpecialty();
+                    return new Object[]{
+                            r.getId(),
+                            r.getUserId(),
+                            userNames.getOrDefault(r.getUserId(), "未知用户"),
+                            r.getDoctorId(),
+                            doctorName,
+                            r.getTitle(),
+                            r.getStatus(),
+                            r.getCreateTime(),
+                            r.getFollowUpTime()
+                    };
+                });
     }
 }

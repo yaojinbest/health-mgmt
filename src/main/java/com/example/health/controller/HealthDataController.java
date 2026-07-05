@@ -6,14 +6,17 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.health.common.AccessService;
 import com.example.health.common.AuthUser;
 import com.example.health.common.BusinessException;
+import com.example.health.common.CsvExporter;
 import com.example.health.common.PageRequest;
 import com.example.health.common.PageResult;
 import com.example.health.common.Result;
 import com.example.health.entity.HealthData;
 import com.example.health.service.HealthDataService;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -94,6 +97,51 @@ public class HealthDataController {
         return Result.ok(healthDataService.list(new LambdaQueryWrapper<HealthData>()
                 .eq(HealthData::getUserId, userId)
                 .orderByAsc(HealthData::getRecordTime)));
+    }
+
+    /**
+     * 健康数据导出 CSV (PC Web 桌面端专用, 2026-07-05 进哥拍板 Q4-B / P2)
+     *
+     * 路径: GET /api/health-data/export?userId=4
+     *
+     * 权限: admin 看全部; doctor/user 遵循 list 同样的 scopedPatientIdsForList
+     * 注意: 不分页, 一次性导出 (如果数据量大, 可改成分批流式)
+     */
+    @GetMapping("/export")
+    public void exportCsv(@RequestParam(required = false) Long userId,
+                          HttpServletResponse response) throws IOException {
+        AuthUser user = accessService.requireLogin();
+        LambdaQueryWrapper<HealthData> wrapper = new LambdaQueryWrapper<>();
+        List<Long> scopedIds = accessService.scopedPatientIdsForList(user, userId);
+        if (scopedIds != null) {
+            if (scopedIds.isEmpty()) {
+                CsvExporter.export(response, "健康数据_空", new String[]{"提示"}, List.of(),
+                        r -> new Object[]{});
+                return;
+            }
+            wrapper.in(HealthData::getUserId, scopedIds);
+        }
+        wrapper.orderByDesc(HealthData::getRecordTime);
+
+        List<HealthData> rows = healthDataService.list(wrapper);
+        CsvExporter.export(response, "健康数据_" + LocalDateTime.now(),
+                new String[]{"ID", "用户ID", "收缩压(mmHg)", "舒张压(mmHg)", "血糖(mmol/L)",
+                        "心率(bpm)", "步数", "睡眠(小时)", "体重(kg)", "警告级别", "警告信息", "记录时间"},
+                rows,
+                r -> new Object[]{
+                        r.getId(),
+                        r.getUserId(),
+                        r.getSystolic(),
+                        r.getDiastolic(),
+                        r.getBloodSugar(),
+                        r.getHeartRate(),
+                        r.getSteps(),
+                        r.getSleepHours(),
+                        r.getWeight(),
+                        r.getWarningLevel(),
+                        r.getWarningMessage(),
+                        r.getRecordTime()
+                });
     }
 
     private void fillWarning(HealthData data) {

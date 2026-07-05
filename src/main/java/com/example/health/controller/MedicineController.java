@@ -6,14 +6,17 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.health.common.AccessService;
 import com.example.health.common.AuthUser;
 import com.example.health.common.BusinessException;
+import com.example.health.common.CsvExporter;
 import com.example.health.common.PageRequest;
 import com.example.health.common.PageResult;
 import com.example.health.common.Result;
 import com.example.health.entity.MedicineRecord;
 import com.example.health.service.MedicineRecordService;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -108,6 +111,51 @@ public class MedicineController {
         record.setStatus("FINISHED");
         medicineRecordService.updateById(record);
         return Result.ok(record);
+    }
+
+    /**
+     * 用药记录导出 CSV (PC Web 桌面端专用)
+     *
+     * 路径: GET /api/medicine/export?userId=4&status=ACTIVE
+     */
+    @GetMapping("/export")
+    public void exportCsv(@RequestParam(required = false) Long userId,
+                          @RequestParam(required = false) String status,
+                          HttpServletResponse response) throws IOException {
+        AuthUser user = accessService.requireLogin();
+        LambdaQueryWrapper<MedicineRecord> wrapper = new LambdaQueryWrapper<>();
+        List<Long> scopedIds = accessService.scopedPatientIdsForList(user, userId);
+        if (scopedIds != null) {
+            if (scopedIds.isEmpty()) {
+                CsvExporter.export(response, "用药记录_空", new String[]{"提示"}, List.of(),
+                        r -> new Object[]{});
+                return;
+            }
+            wrapper.in(MedicineRecord::getUserId, scopedIds);
+        }
+        if (status != null && !status.isBlank()) {
+            wrapper.eq(MedicineRecord::getStatus, status);
+        }
+        wrapper.orderByDesc(MedicineRecord::getCreateTime);
+
+        List<MedicineRecord> rows = medicineRecordService.list(wrapper);
+        CsvExporter.export(response, "用药记录_" + LocalDateTime.now(),
+                new String[]{"ID", "用户ID", "药品名称", "用法", "剂量", "提醒时间",
+                        "开始日期", "结束日期", "状态", "警告", "创建时间"},
+                rows,
+                r -> new Object[]{
+                        r.getId(),
+                        r.getUserId(),
+                        r.getMedicineName(),
+                        r.getUsageMethod(),
+                        r.getDosage(),
+                        r.getReminderTimes(),
+                        r.getStartDate(),
+                        r.getEndDate(),
+                        r.getStatus(),
+                        r.getWarning(),
+                        r.getCreateTime()
+                });
     }
 
     private String buildWarning(MedicineRecord record) {

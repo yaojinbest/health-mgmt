@@ -4,14 +4,18 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.health.common.AuthContext;
+import com.example.health.common.CsvExporter;
 import com.example.health.common.PageRequest;
 import com.example.health.common.PageResult;
 import com.example.health.common.Result;
 import com.example.health.entity.SysUser;
 import com.example.health.service.SysUserService;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.IOException;
+import java.time.LocalDateTime;
 import java.util.List;
 
 @RestController
@@ -77,5 +81,51 @@ public class UserController {
         AuthContext.requireAdmin();
         sysUserService.saveOrUpdate(user);
         return Result.ok(user);
+    }
+
+    /**
+     * 用户列表导出 CSV (PC Web 桌面端专用, 2026-07-05 进哥拍板 Q4-B / P2)
+     *
+     * 路径: GET /api/users/export?keyword=王&role=USER
+     *
+     * 权限: admin only
+     * 脱敏: password 字段置空
+     */
+    @GetMapping("/export")
+    public void exportCsv(@ModelAttribute PageRequest pageRequest,
+                          @RequestParam(required = false) String role,
+                          HttpServletResponse response) throws IOException {
+        AuthContext.requireAdmin();
+
+        LambdaQueryWrapper<SysUser> wrapper = new LambdaQueryWrapper<>();
+        if (role != null && !role.isBlank()) {
+            wrapper.eq(SysUser::getRole, role);
+        }
+        if (pageRequest.getKeyword() != null && !pageRequest.getKeyword().isBlank()) {
+            String kw = pageRequest.getKeyword();
+            wrapper.and(w -> w.like(SysUser::getUsername, kw)
+                    .or().like(SysUser::getRealName, kw)
+                    .or().like(SysUser::getPhone, kw));
+        }
+        wrapper.orderByDesc(SysUser::getCreateTime);
+
+        List<SysUser> rows = sysUserService.list(wrapper);
+        // 脱敏: 密码置空
+        rows.forEach(u -> u.setPassword(null));
+
+        CsvExporter.export(response, "用户列表_" + LocalDateTime.now(),
+                new String[]{"ID", "用户名", "真实姓名", "手机号", "角色", "性别", "年龄", "状态", "创建时间"},
+                rows,
+                r -> new Object[]{
+                        r.getId(),
+                        r.getUsername(),
+                        r.getRealName(),
+                        r.getPhone(),
+                        r.getRole(),
+                        r.getGender(),
+                        r.getAge(),
+                        r.getStatus(),
+                        r.getCreateTime()
+                });
     }
 }
