@@ -41,10 +41,12 @@ if (-not (Test-Path $JarPath)) {
 }
 
 # ---- JDK 17 检查 ----
+$javaBin = $null
 if (-not $env:JAVA_HOME) {
     $jdk17 = Get-Command java -ErrorAction SilentlyContinue
     if ($jdk17) {
         Write-Host "⚠️  JAVA_HOME 未设置, 但 java 在 PATH 中, 继续尝试..." -ForegroundColor Yellow
+        $javaBin = $jdk17.Source  # C:\Program Files\Java\jdk-17\bin\java.exe
     } else {
         Write-Host "❌ 未检测到 Java, 请安装 JDK 17 并设置 JAVA_HOME" -ForegroundColor Red
         Write-Host "   推荐: Eclipse Temurin 17 (https://adoptium.net/)" -ForegroundColor Yellow
@@ -82,13 +84,15 @@ Write-Host "   端口: $Port" -ForegroundColor Gray
 Write-Host "   日志: $logAbs" -ForegroundColor Gray
 Write-Host ""
 
-# 关键: -D 在 -jar 之前 (NSSM 踩坑 #5)
-# 关键: -Dfile.encoding=UTF-8 防中文乱码
-& java `
-    -Dfile.encoding=UTF-8 `
-    -Dspring.profiles.active=prod `
-    -Dserver.port=$Port `
-    -jar "$JarPath" `
-    *>&1 | Tee-Object -FilePath $logAbs -Append
+# 关键修复 (2026-07-05): PowerShell 5.1 + java.exe 传递 -D 参数会被错误拆分
+#   以前写法: & java -Dfile.encoding=UTF-8 -jar ...
+#   问题: java 把 -Dfile.encoding=UTF-8 拆成 -Dfile + encoding=UTF-8
+#         (中文 Windows JDK 报错 "找不到或无法加载主类 .encoding=UTF-8")
+# 解决: 用 cmd.exe 作为中间层, 或者用引号包裹 -D 参数
+chcp 65001 > $null   # 强制控制台 UTF-8 (PowerShell 5.1 中文 Windows 默认 GBK)
+$javaCmd = "`"$javaBin`" -Dfile.encoding=UTF-8 -Dspring.profiles.active=prod -Dserver.port=$Port -jar `"$JarPath`""
+Write-Host "   CMD: $javaCmd" -ForegroundColor Gray
+Write-Host ""
+cmd.exe /c $javaCmd 2>&1 | Tee-Object -FilePath $logAbs -Append
 
 Write-Host "`n🛑 后端已停止 (退出码 $LASTEXITCODE)" -ForegroundColor Yellow

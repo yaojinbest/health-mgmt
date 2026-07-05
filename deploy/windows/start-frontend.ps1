@@ -46,13 +46,24 @@ Write-Host "✅ Node $(& node --version) / npm $(& npm --version)" -ForegroundCo
 # ---- npm install ----
 $nodeModules = Join-Path $FrontendDir "node_modules"
 $packageLock = Join-Path $FrontendDir "package-lock.json"
-if (-not (Test-Path $nodeModules) -or
-    (Test-Path $packageLock) -and
-    (Get-Item $packageLock).LastWriteTime -gt (Get-Item $nodeModules).LastWriteTime) {
+# 2026-07-05 修: Get-Item 在 node_modules 不存在时会抛错, 必须先 Test-Path
+$needsInstall = $false
+if (-not (Test-Path $nodeModules)) {
+    $needsInstall = $true
+} elseif (Test-Path $packageLock) {
+    # 两边都存在才比较 LastWriteTime
+    $lockTime = (Get-Item $packageLock).LastWriteTime
+    $nmTime   = (Get-Item $nodeModules).LastWriteTime
+    if ($lockTime -gt $nmTime) {
+        $needsInstall = $true
+    }
+}
+if ($needsInstall) {
     Write-Host "`n📦 安装 frontend 依赖 (首次 / lock 变了)..." -ForegroundColor Cyan
     Push-Location $FrontendDir
-    try { & npm install --no-audit --no-fund 2>&1 | Tee-Object -FilePath "$ScriptDir\$LogFile" -Append }
+    try { & npm install --no-audit --no-fund *>&1 | Tee-Object -FilePath "$ScriptDir\$LogFile" -Append | Out-Null }
     finally { Pop-Location }
+    Write-Host "✅ 依赖安装完成" -ForegroundColor Green
 }
 
 # ---- 日志目录 ----
@@ -64,12 +75,12 @@ Push-Location $FrontendDir
 try {
     if ($Build) {
         Write-Host "`n🏗️  Build H5 静态产物..." -ForegroundColor Cyan
-        & npm run build 2>&1 | Tee-Object -FilePath "$ScriptDir\$LogFile" -Append | Out-Null
+        & npm run build *>&1 | Tee-Object -FilePath "$ScriptDir\$LogFile" -Append
         Write-Host "`n🚀 启动 vite preview (静态模式, 端口 5176)..." -ForegroundColor Cyan
-        & npm run preview 2>&1 | Tee-Object -FilePath "$ScriptDir\$LogFile" -Append | Out-Null
+        & npm run preview *>&1 | Tee-Object -FilePath "$ScriptDir\$LogFile" -Append
     } else {
         Write-Host "`n🚀 启动 vite dev (开发模式, 端口 5176)..." -ForegroundColor Cyan
-        & npm run dev 2>&1 | Tee-Object -FilePath "$ScriptDir\$LogFile" -Append | Out-Null
+        & npm run dev *>&1 | Tee-Object -FilePath "$ScriptDir\$LogFile" -Append
     }
 }
 finally {

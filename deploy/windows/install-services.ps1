@@ -19,7 +19,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$NssmPath = "C:\Tools\nssm-2.24\win64\nssm.exe",
+    [string]$NssmPath = "",
     [int]$BackendPort = 8090,
     [int]$FrontendPort = 5176,
     [string]$ProjectRoot = "..\.."
@@ -37,14 +37,31 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     exit 1
 }
 
-# ---- NSSM 检查 ----
-if (-not (Test-Path $NssmPath)) {
-    Write-Host "❌ NSSM 不存在: $NssmPath" -ForegroundColor Red
+# ---- NSSM 检查 / 自动搜索 ----
+if (-not $NssmPath) {
+    # 按优先级自动搜常见位置 (避免进哥硬改脚本)
+    $candidates = @(
+        "C:\Tools\nssm-2.24\win64\nssm.exe",
+        "C:\Tools\nssm\win64\nssm.exe",
+        "C:\nssm-2.24\win64\nssm.exe",
+        "C:\Program Files\nssm-2.24\win64\nssm.exe",
+        "$env:LOCALAPPDATA\nssm-2.24\win64\nssm.exe",
+        "$env:USERPROFILE\nssm-2.24\win64\nssm.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { $NssmPath = $c; break }
+    }
+}
+if (-not $NssmPath -or -not (Test-Path $NssmPath)) {
+    Write-Host "❌ 未找到 nssm.exe" -ForegroundColor Red
     Write-Host ""
     Write-Host "下载 NSSM 2.24:" -ForegroundColor Yellow
     Write-Host "   1. 访问 https://nssm.cc/release/nssm-2.24.zip" -ForegroundColor Yellow
     Write-Host "   2. 解压到 C:\Tools\nssm-2.24\" -ForegroundColor Yellow
-    Write-Host "   3. 重试" -ForegroundColor Yellow
+    Write-Host "   3. 重跑 (脚本会自动发现)" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "或者手动指定 -NssmPath 参数:" -ForegroundColor Yellow
+    Write-Host "   .\install-services.ps1 -NssmPath 'D:\tools\nssm-2.24\win64\nssm.exe'" -ForegroundColor Yellow
     exit 2
 }
 Write-Host "✅ NSSM: $NssmPath`n" -ForegroundColor Green
@@ -60,15 +77,21 @@ if (-not (Test-Path $JarPath)) {
 }
 
 # ---- JDK ----
-if (-not $env:JAVA_HOME) {
-    Write-Host "❌ JAVA_HOME 未设置, 服务无法启动 java" -ForegroundColor Red
-    Write-Host "   setx JAVA_HOME 'C:\Program Files\Eclipse Adoptium\jdk-17'" -ForegroundColor Yellow
-    exit 4
+$javaBin = $null
+if ($env:JAVA_HOME) {
+    $javaBin = Join-Path $env:JAVA_HOME "bin\java.exe"
 }
-$javaBin = Join-Path $env:JAVA_HOME "bin\java.exe"
-if (-not (Test-Path $javaBin)) {
-    Write-Host "❌ JAVA_HOME/bin/java.exe 不存在: $javaBin" -ForegroundColor Red
-    exit 4
+if (-not $javaBin -or -not (Test-Path $javaBin)) {
+    # 从 PATH 中搜 java
+    $jdk = Get-Command java -ErrorAction SilentlyContinue
+    if ($jdk) {
+        Write-Host "⚠️  JAVA_HOME 未设置或无效, 从 PATH 搜 java: $($jdk.Source)" -ForegroundColor Yellow
+        $javaBin = $jdk.Source
+    } else {
+        Write-Host "❌ 未检测到 java, 服务无法启动" -ForegroundColor Red
+        Write-Host "   setx JAVA_HOME 'C:\Program Files\Eclipse Adoptium\jdk-17'" -ForegroundColor Yellow
+        exit 4
+    }
 }
 
 # ---- 日志目录 ----

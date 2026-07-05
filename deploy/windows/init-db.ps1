@@ -100,10 +100,12 @@ try {
 
 # ---- 验证 ----
 Write-Host "`n🔍 验证数据 ..." -ForegroundColor Cyan
-$tablesCount = Run-Mysql @('-h', $DbHost, '-P', "$DbPort", '-u', $DbUser,
-    $DbName, '-N', '-B', '-e', 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '"'$DbName'"';')
-$usersCount = Run-Mysql @('-h', $DbHost, '-P', "$DbPort", '-u', $DbUser,
-    $DbName, '-N', '-B', '-e', 'SELECT COUNT(*) FROM sys_user;')
+# PowerShell 5.1 不支持 bash 风格 '"'$var'"' 嵌套引号
+# 改用双引号字符串 + $DbName 插值
+$tablesSql = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$DbName';"
+$usersSql = "SELECT COUNT(*) FROM sys_user;"
+$tablesCount = Run-Mysql @('-h', $DbHost, '-P', "$DbPort", '-u', $DbUser, $DbName, '-N', '-B', '-e', $tablesSql)
+$usersCount = Run-Mysql @('-h', $DbHost, '-P', "$DbPort", '-u', $DbUser, $DbName, '-N', '-B', '-e', $usersSql)
 
 Write-Host "✅ 创建数据库: $DbName (表数=$tablesCount, 演示用户数=$usersCount)" -ForegroundColor Green
 
