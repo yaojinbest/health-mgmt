@@ -130,7 +130,16 @@ if ($rootPwd.Length -eq 0) {
 
 function Run-Mysql {
     param([string[]]$Args_)
-    & $mysqlExe --default-character-set=utf8mb4 @Args_
+    # mysql.exe 警告 (如 --ssl-verify-server-cert) 会写 stderr,
+    # PowerShell 的 & + $ErrorActionPreference=Stop 会拋 RemoteException。
+    # 临时调成 Continue 避免中断。
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $mysqlExe --default-character-set=utf8mb4 @Args_ 2>&1
+    } finally {
+        $ErrorActionPreference = $prevPref
+    }
     return $LASTEXITCODE
 }
 
@@ -186,10 +195,17 @@ if ($portOpen) {
 
 # ---- 测试连接 ----
 Write-Host "`n🔍 测试数据库连接 $DbHost`:$DbPort ..." -ForegroundColor Cyan
-$connTestOut = & $mysqlExe --default-character-set=utf8mb4 `
-    -h $DbHost -P "$DbPort" -u $DbUser `
-    -e "SELECT VERSION();" 2>&1
-$connTest = $LASTEXITCODE
+# 临时改 ErrorActionPreference = Continue (避免 mysql.exe WARNING 报 stderr 触发 $ErrorActionPreference=Stop)
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    $connTestOut = & $mysqlExe --default-character-set=utf8mb4 `
+        -h $DbHost -P "$DbPort" -u $DbUser `
+        -e "SELECT VERSION();" 2>&1
+    $connTest = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevPref
+}
 if ($connTest -ne 0) {
     $errMsg = ($connTestOut | Out-String)
     Write-Host "❌ 数据库连接失败 (退出码 $connTest)" -ForegroundColor Red
@@ -228,10 +244,16 @@ try {
 
     Write-Host "📦 导入 sql/init.sql 到 $DbName ..." -ForegroundColor Cyan
     $import = Run-Mysql @('-h', $DbHost, '-P', "$DbPort", '-u', $DbUser)
-    # 把内容通过管道喂给 mysql
-    Get-Content $tmpSql | & $mysqlExe --default-character-set=utf8mb4 `
-        -h $DbHost -P "$DbPort" -u $DbUser `
-        $DbName 2>&1 | Tee-Object -Variable importOutput | Out-Null
+    # 把内容通过管道喂给 mysql (同样要包 try/finally 避免 WARNING 拋 RemoteException)
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        Get-Content $tmpSql | & $mysqlExe --default-character-set=utf8mb4 `
+            -h $DbHost -P "$DbPort" -u $DbUser `
+            $DbName 2>&1 | Tee-Object -Variable importOutput | Out-Null
+    } finally {
+        $ErrorActionPreference = $prevPref
+    }
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host "❌ 导入失败, 输出:`n$importOutput" -ForegroundColor Red
