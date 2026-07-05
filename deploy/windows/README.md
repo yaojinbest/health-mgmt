@@ -1,4 +1,4 @@
-# 🩺 健康管理系统 - Windows / Linux 部署文档 (v1.0)
+# 🩺 健康管理系统 - Windows / Linux 部署文档 (v2.0)
 
 > 学生实践项目 · 二次开发定制版 · 适用于答辩演示与日常开发
 
@@ -10,14 +10,16 @@
 |---|---|
 | **项目名** | 健康管理系统 (health-management) |
 | **后端** | Spring Boot 3.3.5 + MyBatis-Plus 3.5.9 + JDK 17 |
-| **前端 H5** | Vue 3 + Vite 6 + ECharts 5 |
+| **前端 PC Web** | Vue 3 + Vite 6 + Element Plus + ECharts 5 |
 | **数据库** | MySQL 8+ / MariaDB 10+ |
 | **Android** | Kotlin + ViewBinding + Material 3（独立 APK） |
-| **默认端口** | 后端 `8090` / H5 `5176` / 数据库 `3305` |
+| **默认端口** | 后端 `8090` / PC Web `5174` / 数据库 `3305` |
 | **演示账号** | 患者 `user_wang / root` · 医生 `doctor_zhang / root` · 管理员 `admin / root` |
 | **演示数据** | 15 张表全部含 seed (init.sql 268 行) |
 
 > 🔔 **端口说明**：项目用 `3305` 端口（避免与系统中已有的 `3306` MySQL 冲突）。如有冲突，改 `application.yml`。
+>
+> 🔔 **v2.0 变更**：H5 移动端 (`frontend/`) 已删除，仅保留 PC Web 后台 (`frontend-pc/`)。
 
 ---
 
@@ -53,7 +55,7 @@
 
 ```
 健康管理系统/
-├── frontend/                       # H5 源码 (Vue 3)
+├── frontend-pc/                    # PC Web 源码 (Vue 3 + Element Plus) ⭐
 │   ├── src/
 │   ├── package.json
 │   └── dist/                       # 已构建好的静态产物
@@ -68,7 +70,7 @@
     └── windows/                    # Windows 部署脚本
         ├── init-db.ps1             # 数据库初始化
         ├── start-backend.ps1       # 启动后端 (前台)
-        ├── start-frontend.ps1      # 启动 H5 (前台)
+        ├── start-frontend-pc.ps1   # 启动 PC Web (前台)
         ├── install-services.ps1    # 注册 Windows 服务
         ├── uninstall-services.ps1  # 卸载服务
         └── smoke-test.ps1          # 端到端验证
@@ -140,23 +142,23 @@ Tomcat started on port 8090 (http)
 Started HealthManagementApplication in 3.45 seconds
 ```
 
-### 3.5 启动 H5 (开发模式)
+### 3.5 启动 PC Web (开发模式)
 
 新开 PowerShell 窗口：
 ```powershell
 cd 健康管理系统\deploy\windows
-.\start-frontend.ps1
+.\start-frontend-pc.ps1
 ```
 
 浏览器打开：
-- 患者 H5: http://localhost:5176/
-- 工作台: http://localhost:5176/manage
-
-**演示登录**: `user_wang / root`
+- PC Web 后台: http://localhost:5174/
+- **演示登录**: `admin / root` (管理员, 看 Dashboard + Stats)
+- 患者: `user_wang / root`
+- 医生: `doctor_zhang / root`
 
 ### 3.6 Android 客户端
 
-详见下方 [Android 客户端](#-4-android-客户端) 一节。
+详见下方 [Android 客户端](#-6-android-客户端) 一节。
 
 ---
 
@@ -165,9 +167,9 @@ cd 健康管理系统\deploy\windows
 | 任务 | 命令 |
 |---|---|
 | 启动后端 (前台) | `.\start-backend.ps1` |
-| 启动 H5 (前台) | `.\start-frontend.ps1` |
+| 启动 PC Web (前台) | `.\start-frontend-pc.ps1` |
 | 重新构建后端 | `cd 健康管理系统; mvn package -DskipTests` |
-| 重新构建前端 (生产 dist) | `.\start-frontend.ps1 -Build` |
+| 重新构建前端 (生产 dist) | `.\start-frontend-pc.ps1 -Build` |
 | 端到端验证 | `.\smoke-test.ps1` |
 | 看后端日志 (前台) | 在运行窗口 Ctrl+Scroll 或查看 `logs\backend.log` |
 | 看后端日志 (服务模式) | `Get-Content logs\backend.out.log -Wait` |
@@ -180,8 +182,8 @@ cd 健康管理系统\deploy\windows
 
 ```powershell
 # 1. PowerShell ⭐ 管理员 ⭐ 身份运行
-# 2. 先用 start-frontend.ps1 让它 npm install (否则 vite.cmd 不存在)
-.\start-frontend.ps1
+# 2. 先用 start-frontend-pc.ps1 让它 npm install + build (否则 vite.cmd 不存在)
+.\start-frontend-pc.ps1 -Build
 # Ctrl+C 终止
 
 # 3. 安装服务
@@ -194,19 +196,20 @@ cd 健康管理系统\deploy\windows
 ✅ NSSM: C:\Tools\nssm-2.24\win64\nssm.exe
 📦 安装服务: HealthMgmtBackend
 ✅ HealthMgmtBackend 已安装 (类型: AUTO_START, 失败重启)
-📦 安装服务: HealthMgmtFrontend
-✅ HealthMgmtFrontend 已安装 (类型: AUTO_START, 失败重启)
+📦 安装服务: HealthMgmtFrontendPc
+✅ HealthMgmtFrontendPc 已安装 (类型: AUTO_START, 失败重启)
 🚀 启动服务...
 🎉 安装完成!
 ```
 
 **管理命令**:
 ```powershell
-sc query HealthMgmtBackend          # 状态
-sc stop HealthMgmtBackend           # 停止
-sc start HealthMgmtBackend          # 启动
-services.msc                        # 图形管理
-Get-Content logs\backend.out.log -Wait  # 实时日志流
+sc query HealthMgmtBackend             # 后端状态
+sc stop HealthMgmtBackend              # 停止后端
+sc start HealthMgmtBackend             # 启动后端
+sc query HealthMgmtFrontendPc          # PC Web 状态
+services.msc                           # 图形管理
+Get-Content logs\backend.out.log -Wait # 实时日志流
 ```
 
 **卸载**:
@@ -220,24 +223,24 @@ Get-Content logs\backend.out.log -Wait  # 实时日志流
 
 ### 6.1 获取 APK
 
-**方式 A**: 用我已经构建好的 `app-debug.apk`
+**方式 A**: 用我已经构建好的 `app-release.apk`
 ```
-路径: app/build/outputs/apk/debug/app-debug.apk
-大小: 7.74 MB
-md5:  (运行 Get-FileHash 获取)
+路径: app/build/outputs/apk/release/app-release.apk
+大小: 6.0 MB
+md5:  3c12431d87f1c8624f270d5e265e673e
 ```
 
 **方式 B**: 自己重新构建
 ```bash
-cd /path/to/android-app
-JAVA_HOME=/path/to/jdk-17 ./gradlew assembleDebug
+cd /path/to/health-mgmt-app
+JAVA_HOME=/path/to/jdk-17 ./gradlew assembleRelease
 ```
 
 ### 6.2 安装到设备
 
 **模拟器** (Android Studio AVD):
 ```powershell
-adb install -r app-debug.apk
+adb install -r app-release.apk
 # 默认 10.0.2.2:8090 直连宿主机, 无需额外配置
 ```
 
@@ -248,11 +251,11 @@ adb devices
 
 # 2. 方式 A: 反向代理 (推荐, 不依赖 WiFi)
 adb reverse tcp:8090 tcp:8090
-adb install -r app-debug.apk
+adb install -r app-release.apk
 
 # 3. 方式 B: 同 WiFi 局域网, 改 API 地址
 #    修改 app/build.gradle 的 API_BASE_URL = "http://<宿主机IP>:8090/"
-#    重新 ./gradlew assembleDebug
+#    重新 ./gradlew assembleRelease
 ```
 
 ### 6.3 演示数据准备
@@ -266,12 +269,12 @@ adb install -r app-debug.apk
 
 ### 6.4 完整演示流程
 
-1. 启动后端 + H5 (在 PC)
+1. 启动后端 + PC Web (在 PC)
 2. 手机连 USB 或模拟器开
 3. `adb reverse tcp:8090 tcp:8090` (USB 真机)
 4. 安装 + 启动 APK
 5. demo 账号登录
-6. 体验：录入健康数据、看趋势图、查用药、紧急 SOS、看文章
+6. 体验：录入健康数据、看趋势图、查用药、紧急 SOS、看文章、在线咨询
 
 ---
 
@@ -299,18 +302,20 @@ Test-NetConnection localhost -Port 3305  # 验证端口
 **修复**:
 - MariaDB 启动时 `--skip-grant-tables` 进安全管理改密码
 - 或检查 `application.yml` 的 `spring.datasource.password`
+- 注: jar 默认 password=空 (跟 init-db.ps1 默认行为一致)
 
-### 7.4 H5 启动报 "EADDRINUSE :::5176"
+### 7.4 PC Web 启动报 "EADDRINUSE :::5174"
 **根因**: 端口被占。
-**修复**: 改 `frontend/vite.config.js` 的 `server.port = 5177`, 或结束占 5176 的进程。
+**修复**: 改 `frontend-pc/vite.config.js` 的 `server.port = 5175`, 或结束占 5174 的进程。
 
-### 7.5 浏览器访问 http://localhost:5176/ 空白
-**根因**: `node_modules` 未安装 / Vite 未起来。
+### 7.5 浏览器访问 http://localhost:5174/ 空白
+**根因**: `node_modules` 未安装 / Vite 未 build。
 **修复**:
 ```powershell
-cd ../frontend
+cd ..\frontend-pc
 npm install
-npm run dev
+npm run build
+npm run preview
 ```
 
 ### 7.6 后端启动报 "Port 8090 was already in use"
@@ -343,6 +348,7 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 - 模拟器: `http://10.0.2.2:8090` (默认配置)
 - USB 真机: `adb reverse tcp:8090 tcp:8090`
 - WiFi 真机: PC 防火墙放行 8090 + 用局域网 IP
+- App 内点齿轮按钮可改服务器地址 (运行时配置, 不需重打 APK)
 
 ### 7.10 NSSM 服务启动后立即停
 **根因**: 一般是 java 路径错 / jar 路径错。
@@ -418,10 +424,11 @@ sc start HealthMgmtBackend
 ## 📜 10. License & 文档版本
 
 - **License**: 课程演示用途, 仅供学习
-- **文档版本**: v1.0 (2026-07-05)
+- **文档版本**: v2.0 (2026-07-06)
 - **基于**: OPC_K `deploy-windows` skill (智慧家庭 17 轮 force-push 实战)
 - **作者**: pm_jiaozi (饺子)
 - **修订记录**:
+  - v2.0 (2026-07-06): 移除 H5 前端 (`frontend/`), 仅保留 PC Web (`frontend-pc/`)
   - v1.0 (2026-07-05): 初始版本 (适配健康管理系统)
 
 ---
@@ -436,7 +443,7 @@ sc start HealthMgmtBackend
 ---
 
 🎓 **学生项目答辩备注**：
-- 启动只需 3 步 (start-backend → start-frontend → 浏览器访问)
+- 启动只需 3 步 (start-backend → start-frontend-pc → 浏览器访问)
 - 服务化可选 (开机自启)
 - Android 客户端独立 APK (不依赖 PC)
 - 演示账号已含 seed (user_wang / root)

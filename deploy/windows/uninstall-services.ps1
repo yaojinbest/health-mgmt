@@ -1,4 +1,4 @@
-﻿# ============================================================================
+# ============================================================================
 #  uninstall-services.ps1 - 卸载健康管理系统的 Windows 服务
 # ============================================================================
 [CmdletBinding()]
@@ -22,7 +22,7 @@ if (-not (Test-Path $NssmPath)) {
     exit 2
 }
 
-$services = @("HealthMgmtBackend", "HealthMgmtFrontend")
+$services = @("HealthMgmtBackend", "HealthMgmtFrontendPc")
 
 foreach ($svc in $services) {
     $exists = & $NssmPath status $svc 2>$null

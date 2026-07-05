@@ -1,26 +1,26 @@
-﻿# ============================================================================
+# ============================================================================
 #  smoke-test.ps1 - 健康管理系统端到端冒烟测试
 # ============================================================================
 #
-#  8 场景 (对齐 d7 smoke-test.sh 15/15 思路, 简化到 8 关键场景):
-#    1. 后端 health / version
-#    2. H5 dev server / preview
+#  8 场景 (PC Web + 后端 + Android 三端覆盖):
+#    1. 后端可达
+#    2. PC Web 可达 (Vite preview)
 #    3. 患者登录 (user_wang / root)
 #    4. 患者健康数据列表
 #    5. 医生登录 (doctor_zhang / root)
-#    6. 患者档案查询
+#    6. 管理员登录 (admin / root)
 #    7. 紧急联系人列表
 #    8. 健康文章列表
 #
 #  用法:
-#    PS> .\smoke-test.ps1                          # 默认 http://localhost:8090
+#    PS> .\smoke-test.ps1                          # 默认 http://localhost:8090 + PC Web 5174
 #    PS> .\smoke-test.ps1 -Base http://10.0.0.5   # 远程主机
 # ============================================================================
 
 [CmdletBinding()]
 param(
     [string]$Base = "http://localhost:8090",
-    [string]$Frontend = "http://localhost:5176"
+    [string]$Frontend = "http://localhost:5174"
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -54,8 +54,15 @@ Test-Step "1. 后端 ROOT" {
     return "OK"
 }
 
-# ---- 2. 登录 ----
-Test-Step "2. 患者登录 (user_wang/root)" {
+# ---- 2. PC Web 可达 ----
+Test-Step "2. PC Web 预览服务 (Vite preview 5174)" {
+    $r = Invoke-WebRequest "$Frontend/" -UseBasicParsing -TimeoutSec 5
+    if ($r.StatusCode -eq 200) { return "OK" }
+    return "$($r.StatusCode)"
+}
+
+# ---- 3. 登录 ----
+Test-Step "3. 患者登录 (user_wang/root)" {
     $body = @{username="user_wang"; password="root"} | ConvertTo-Json
     $r = Invoke-RestMethod "$Base/api/auth/login" -Method POST -ContentType "application/json" -Body $body -TimeoutSec 5
     if ($r.code -eq 200 -and $r.data.token) {
@@ -66,8 +73,8 @@ Test-Step "2. 患者登录 (user_wang/root)" {
     return $r.message
 }
 
-# ---- 3. 健康数据列表 ----
-Test-Step "3. 患者健康数据列表" {
+# ---- 4. 健康数据列表 ----
+Test-Step "4. 患者健康数据列表" {
     $headers = @{Authorization = "Bearer $script:patientToken"}
     $r = Invoke-RestMethod "$Base/api/health-data/list?userId=$($script:patientId)" `
         -Headers $headers -TimeoutSec 5
@@ -75,8 +82,8 @@ Test-Step "3. 患者健康数据列表" {
     return $r.message
 }
 
-# ---- 4. 紧急联系人列表 ----
-Test-Step "4. 紧急联系人列表" {
+# ---- 5. 紧急联系人列表 ----
+Test-Step "5. 紧急联系人列表" {
     $headers = @{Authorization = "Bearer $script:patientToken"}
     $r = Invoke-RestMethod "$Base/api/emergency/contact/list?userId=$($script:patientId)" `
         -Headers $headers -TimeoutSec 5
@@ -84,15 +91,15 @@ Test-Step "4. 紧急联系人列表" {
     return $r.message
 }
 
-# ---- 5. 健康文章列表 ----
-Test-Step "5. 健康文章列表 (公开, 无需登录)" {
+# ---- 6. 健康文章列表 ----
+Test-Step "6. 健康文章列表 (公开, 无需登录)" {
     $r = Invoke-RestMethod "$Base/api/article/list" -TimeoutSec 5
     if ($r.code -eq 200) { return "OK" }
     return $r.message
 }
 
-# ---- 6. 医生登录 ----
-Test-Step "6. 医生登录 (doctor_zhang/root)" {
+# ---- 7. 医生登录 ----
+Test-Step "7. 医生登录 (doctor_zhang/root)" {
     $body = @{username="doctor_zhang"; password="root"} | ConvertTo-Json
     $r = Invoke-RestMethod "$Base/api/auth/login" -Method POST -ContentType "application/json" -Body $body -TimeoutSec 5
     if ($r.code -eq 200 -and $r.data.token) {
@@ -102,8 +109,8 @@ Test-Step "6. 医生登录 (doctor_zhang/root)" {
     return $r.message
 }
 
-# ---- 7. 未授权访问 ----
-Test-Step "7. 未授权访问被拒 (无 token)" {
+# ---- 8. 未授权访问被拒 ----
+Test-Step "8. 未授权访问被拒 (无 token)" {
     try {
         $r = Invoke-RestMethod "$Base/api/health-data/list" -TimeoutSec 5
         return "❌ 应该 401"
@@ -114,13 +121,6 @@ Test-Step "7. 未授权访问被拒 (无 token)" {
         }
         throw
     }
-}
-
-# ---- 8. H5 可达 ----
-Test-Step "8. H5 dev server 可达" {
-    $r = Invoke-WebRequest "$Frontend/" -UseBasicParsing -TimeoutSec 5
-    if ($r.StatusCode -eq 200) { return "OK" }
-    return "$($r.StatusCode)"
 }
 
 # ---- 总结 ----

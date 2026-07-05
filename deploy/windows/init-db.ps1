@@ -291,8 +291,8 @@ Write-Host "   - 医生:  doctor_zhang / root" -ForegroundColor White
 Write-Host "   - 管理员: admin / root" -ForegroundColor White
 Write-Host ""
 Write-Host "下一步:" -ForegroundColor Cyan
-Write-Host "   PS> .\start-backend.ps1   # 启动后端" -ForegroundColor White
-Write-Host "   PS> .\start-frontend.ps1  # 启动 H5 (开发模式)" -ForegroundColor White
+Write-Host "   PS> .\start-backend.ps1        # 启动后端" -ForegroundColor White
+Write-Host "   PS> .\start-frontend-pc.ps1    # 启动 PC Web 后台" -ForegroundColor White
 Write-Host ""
 # 提醒端口不一致问题
 $appYmlPort = 3305

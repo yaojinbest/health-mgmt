@@ -1,4 +1,4 @@
-﻿# ============================================================================
+# ============================================================================
 #  install-services.ps1 - 将健康管理系统安装为 Windows 后台服务
 # ============================================================================
 #
@@ -10,7 +10,7 @@
 #  作用:
 #    1. 创建 logs/ 目录
 #    2. 注册 HealthMgmtBackend 服务 (NSSM + Spring Boot jar)
-#    3. 注册 HealthMgmtFrontend 服务 (NSSM + Vite dev)
+#    3. 注册 HealthMgmtFrontendPc 服务 (NSSM + Vite preview, PC Web 后台)
 #    4. 设置自启动, 失败自动重启
 #
 #  用法 (管理员 PowerShell):
@@ -21,7 +21,7 @@
 param(
     [string]$NssmPath = "",
     [int]$BackendPort = 8090,
-    [int]$FrontendPort = 5176,
+    [int]$FrontendPort = 5174,
     [string]$ProjectRoot = "..\.."
 )
 
@@ -39,7 +39,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 
 # ---- NSSM 检查 / 自动搜索 ----
 if (-not $NssmPath) {
-    # 按优先级自动搜常见位置 (避免进哥硬改脚本)
+    # 按优先级自动搜常见位置 (避免硬改脚本)
     $candidates = @(
         "C:\Tools\nssm-2.24\win64\nssm.exe",
         "C:\Tools\nssm\win64\nssm.exe",
@@ -139,7 +139,7 @@ function Install-NssmService {
 # 关键: -D 必须在 -jar 前 (NSSM 踩坑 #5)
 # 关键: 整个 AppParameters 用单引号, 保留 $ 给 JVM (NSSM 踩坑 #6)
 $backendArgs = "`"$javaBin`" -Dfile.encoding=UTF-8 -Dspring.profiles.active=prod -Dserver.port=$BackendPort -jar `"$JarPath`""
-$backendArgs = $backendArgs -replace '"','""'  # nssm set 参数需要双引号转义? 不, 我们直接 set string
+$backendArgs = $backendArgs -replace '"','""'
 
 # NSSM 实际接受 string 用空格分隔的 exe + args, 简单做法:
 #   nssm set Name Application <exe>
@@ -154,37 +154,35 @@ Install-NssmService `
     -StdoutLog (Join-Path $logDir "backend.out.log") `
     -StderrLog (Join-Path $logDir "backend.err.log")
 
-# ---- 注册前端服务 ----
+# ---- 注册 PC Web 前端服务 (Vite preview, 端口 5174) ----
+# 注意: frontend/ (H5) 已删除, 只剩 frontend-pc/ (PC Web 后台)
 $npmBin = (Get-Command npm).Source
 $npmDir = Split-Path -Parent $npmBin
 $nodeBin = Join-Path $npmDir "node.exe"
 
-$frontendDir = Join-Path $AbsRoot "frontend"
+$frontendDir = Join-Path $AbsRoot "frontend-pc"
 
-# nssm 跑 npm 会有 cmd 包装问题, 用 node 直接跑 vite
-$frontendWorkDir = $frontendDir
-
-# 这里用 nssm + node 直接运行 vite (需要 package.json 已 install)
+# 这里用 nssm + node 直接运行 vite preview (dist 必须先 build)
 $viteCmd = Join-Path $frontendDir "node_modules\.bin\vite.cmd"
 if (Test-Path $viteCmd) {
     Install-NssmService `
-        -Name "HealthMgmtFrontend" `
+        -Name "HealthMgmtFrontendPc" `
         -Exe $viteCmd `
-        -Args "--host 0.0.0.0 --port $FrontendPort" `
-        -DisplayName "健康管理系统 - H5" `
-        -Description "Vue 3 + Vite H5 开发服务器" `
+        -Args "preview --host 0.0.0.0 --port $FrontendPort" `
+        -DisplayName "健康管理系统 - PC Web" `
+        -Description "Vue 3 + Element Plus PC Web 后台" `
         -StdoutLog (Join-Path $logDir "frontend.out.log") `
         -StderrLog (Join-Path $logDir "frontend.err.log")
 } else {
-    Write-Host "`n⚠️  frontend/node_modules 不存在, 跳过前端服务" -ForegroundColor Yellow
-    Write-Host "   先跑 start-frontend.ps1 让它 npm install, 再重新 install-services" -ForegroundColor Yellow
+    Write-Host "`n⚠️  frontend-pc/node_modules 不存在, 跳过 PC Web 服务" -ForegroundColor Yellow
+    Write-Host "   先跑 start-frontend-pc.ps1 让它 npm install + build, 再重新 install-services" -ForegroundColor Yellow
 }
 
 # ---- 启动 ----
 Write-Host "`n🚀 启动服务..." -ForegroundColor Cyan
 & $NssmPath start HealthMgmtBackend | Out-Null
 if (Test-Path $viteCmd) {
-    & $NssmPath start HealthMgmtFrontend | Out-Null
+    & $NssmPath start HealthMgmtFrontendPc | Out-Null
 }
 
 Start-Sleep -Seconds 3
@@ -193,8 +191,9 @@ Write-Host "`n🎉 安装完成!" -ForegroundColor Green
 Write-Host "   后端 PID: $((Get-Service HealthMgmtBackend -ErrorAction SilentlyContinue).Status)" -ForegroundColor White
 Write-Host ""
 Write-Host "📝 常用命令:" -ForegroundColor Cyan
-Write-Host "   sc query HealthMgmtBackend          # 查询状态" -ForegroundColor White
-Write-Host "   sc stop HealthMgmtBackend           # 停止" -ForegroundColor White
-Write-Host "   sc start HealthMgmtBackend          # 启动" -ForegroundColor White
-Write-Host "   services.msc                        # 图形管理" -ForegroundColor White
-Write-Host "   .\uninstall-services.ps1            # 卸载" -ForegroundColor White
+Write-Host "   sc query HealthMgmtBackend             # 后端状态" -ForegroundColor White
+Write-Host "   sc stop HealthMgmtBackend              # 停止后端" -ForegroundColor White
+Write-Host "   sc start HealthMgmtBackend             # 启动后端" -ForegroundColor White
+Write-Host "   sc query HealthMgmtFrontendPc          # PC Web 状态" -ForegroundColor White
+Write-Host "   services.msc                           # 图形管理" -ForegroundColor White
+Write-Host "   .\uninstall-services.ps1               # 卸载" -ForegroundColor White
