@@ -1,4 +1,4 @@
-# UTF-8 BOM (必备, 否则中文注释乱码)
+﻿# UTF-8 BOM (必备, 否则中文注释乱码)
 <#
 .SYNOPSIS
   启动 PC Web 桌面端 (frontend-pc)
