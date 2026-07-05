@@ -1,0 +1,32 @@
+# =============================================================================
+# 健康管理系统 - 后端环境变量模板
+# =============================================================================
+# 用法:
+#   1. 复制本文件到 .env (本地使用)
+#   2. 修改实际值
+#   3. install-services.ps1 会自动读取
+# =============================================================================
+
+# ---- Java ----
+JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17
+
+# ---- MariaDB / MySQL ----
+DB_HOST=127.0.0.1
+DB_PORT=3305
+DB_NAME=health_management
+DB_USER=root
+DB_PASSWORD=root
+
+# ---- 后端服务 ----
+BACKEND_PORT=8090
+BACKEND_JAR=target\health-management-1.0.0.jar
+BACKEND_LOG=logs\backend.log
+
+# ---- H5 前端 (开发用 Vite dev) ----
+H5_PORT=5176
+H5_LOG=logs\frontend.log
+
+# ---- 应用配置 (可选, 覆盖 application.yml 默认值) ----
+# JWT_SECRET=health-management-jwt-secret-key-2026-PROD
+# UPLOAD_DIR=uploads
+# SERVER_TIMEZONE=Asia/Shanghai

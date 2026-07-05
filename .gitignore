@@ -1,0 +1,17 @@
+# 构建产物
+target/
+frontend/dist/
+frontend/node_modules/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 系统
+.DS_Store
+*.swp
+
+# 上传文件
+uploads/*
+!uploads/.gitkeep
