@@ -274,35 +274,39 @@ if ($ResetRootPassword) {
     #    (mariadb 11.x mysql.global_priv is protected - root in skip-grant has only SELECT)
     #    Pre-computed hash: PASSWORD('opck2026') = *C9677062716458A38A41FA101A14725A3CE8F1FE
     #    access = 1099511627775 (0x0FFFFF7FF = all 30 root privilege bits, NOT 18446744073709551615 = -1)
-    Write-Host "7) Write init-fix.sql + restart mariadbd with --init-file..." -ForegroundColor Cyan
-    $newHash = "*C9677062716458A38A41FA101A14725A3CE8F1FE"
-    $accessBits = "1099511627775"
-    $initFixSql = @"
-USE mysql;
-DELETE FROM mysql.global_priv WHERE User='root';
-INSERT INTO mysql.global_priv (Host, User, Priv) VALUES
-  ('localhost', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW()))),
-  ('127.0.0.1', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW()))),
-  ('::1', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW())));
-FLUSH PRIVILEGES;
-"@
+    #    v3.2.17: ps1 NO LONGER uses here-string (PowerShell 5.1 line-ending mangling)
+    #             instead reads deploy/windows/init-fix.sql as external file (md5 100% predictable)
+    Write-Host "7) Copy init-fix.sql + restart mariadbd with --init-file..." -ForegroundColor Cyan
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+    $initFixSource = Join-Path $scriptDir "init-fix.sql"
+    if (-not (Test-Path $initFixSource)) {
+        Write-Host "  [FAIL] init-fix.sql not found in $scriptDir" -ForegroundColor Red
+        Write-Host "  Please place init-fix.sql next to init-db.ps1 (md5 46b944839c66d91c5fd1d828864fad71)" -ForegroundColor Yellow
+        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
+        exit 12
+    }
     $initFixPath = Join-Path $newDataDir "init-fix.sql"
-    Write-Host "  Write $initFixPath ..." -ForegroundColor Gray
-    [System.IO.File]::WriteAllText($initFixPath, $initFixSql, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "  Copy $initFixSource -> $initFixPath ..." -ForegroundColor Gray
+    # Copy-Item preserves binary content exactly (NO line-ending transformation)
+    Copy-Item -Path $initFixSource -Destination $initFixPath -Force
     if (-not (Test-Path $initFixPath)) {
-        Write-Host "  [FAIL] Cannot write init-fix.sql" -ForegroundColor Red
+        Write-Host "  [FAIL] Cannot copy init-fix.sql" -ForegroundColor Red
         & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
         exit 13
     }
     $fixContent = Get-Content $initFixPath -Raw
     Write-Host "  init-fix.sql bytes: $($fixContent.Length)" -ForegroundColor Gray
     Write-Host "  preview: $($fixContent.Substring(0, [Math]::Min(200, $fixContent.Length)))..." -ForegroundColor Gray
-    # Verify file content hash matches expected
-    $expectedHash = "46b944839c66d91c5fd1d828864fad71"  # md5 of 1164-byte LF content
+    # Verify file content hash matches expected (100% deterministic content)
+    $expectedHash = "46b944839c66d91c5fd1d828864fad71"  # md5 of v3.2.17 init-fix.sql
     $actualHash = (Get-FileHash $initFixPath -Algorithm MD5).Hash.ToLower()
     Write-Host "  expected md5: $expectedHash" -ForegroundColor Gray
     Write-Host "  actual md5:   $actualHash" -ForegroundColor Gray
-    Write-Host "  OK (init-fix.sql written)" -ForegroundColor Green
+    if ($actualHash -ne $expectedHash) {
+        Write-Host "  [WARN] init-fix.sql md5 mismatch - but file copied ok. Proceeding..." -ForegroundColor Yellow
+    } else {
+        Write-Host "  OK (init-fix.sql content verified, md5 match)" -ForegroundColor Green
+    }
 
     # 8) SHUTDOWN current mariadbd (currently running normally, no privileges)
     Write-Host "8) SHUTDOWN current mariadbd..." -ForegroundColor Cyan
