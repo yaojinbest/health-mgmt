@@ -263,25 +263,40 @@ if ($ResetRootPassword) {
     }
     Write-Host "  OK (empty password login works)" -ForegroundColor Green
 
-    $alterSql = @"
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' IDENTIFIED BY '$DbPassword' WITH GRANT OPTION;
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' IDENTIFIED BY '$DbPassword' WITH GRANT OPTION;
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' IDENTIFIED BY '$DbPassword' WITH GRANT OPTION;
+    # Diagnose: see current root entries
+    Write-Host "  Diagnose: see current root entries..." -ForegroundColor Gray
+    $diagSql = "SELECT User, Host, JSON_EXTRACT(Priv, '\$.plugin') AS plugin, LEFT(IFNULL(JSON_UNQUOTE(JSON_EXTRACT(Priv, '\$.authentication_string')), '<NULL>'), 30) AS auth_str_start FROM mysql.global_priv WHERE User='root';"
+    $diagOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $diagSql 2>&1
+    $diagOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+
+    # DELETE + INSERT into mysql.global_priv (bypass GRANT/ALTER)
+    # Use pre-computed password hash: *C9677062716458A38A41FA101A14725A3CE8F1FE
+    Write-Host "  DELETE + INSERT root into mysql.global_priv (bypass GRANT/ALTER)..." -ForegroundColor Cyan
+    $newHash = "*C9677062716458A38A41FA101A14725A3CE8F1FE"
+    $insertSql = @"
+DELETE FROM mysql.global_priv WHERE User='root';
+INSERT INTO mysql.global_priv (Host, User, Priv) VALUES
+  ('localhost', 'root', JSON_OBJECT('access', 18446744073709551615, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 18446744073709551615, 'max_user_connections', 18446744073709551615, 'max_statement_time', 0.0)),
+  ('127.0.0.1', 'root', JSON_OBJECT('access', 18446744073709551615, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 18446744073709551615, 'max_user_connections', 18446744073709551615, 'max_statement_time', 0.0)),
+  ('::1', 'root', JSON_OBJECT('access', 18446744073709551615, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 18446744073709551615, 'max_user_connections', 18446744073709551615, 'max_statement_time', 0.0));
 FLUSH PRIVILEGES;
 "@
-    Write-Host "  SQL: $alterSql" -ForegroundColor Gray
-    $alterOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $alterSql 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAIL] GRANT failed: $($alterOut -join ' ')" -ForegroundColor Red
+    Write-Host "  SQL: $insertSql" -ForegroundColor Gray
+    $insertOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $insertSql 2>&1
+    $insertExit = $LASTEXITCODE
+    $insertOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    if ($insertExit -ne 0) {
+        Write-Host "  [FAIL] DELETE+INSERT failed" -ForegroundColor Red
         & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
         exit 13
     }
-    Write-Host "  OK (GRANT succeeded on fresh global_priv)" -ForegroundColor Green
+    Write-Host "  OK (DELETE+INSERT succeeded)" -ForegroundColor Green
 
-    # Verify root@localhost entry now has password hash
-    Write-Host "  Check root@localhost priv after GRANT..." -ForegroundColor Gray
-    $privCheck = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SELECT User, Host, JSON_EXTRACT(Priv, '\$.plugin') AS plugin, LEFT(JSON_EXTRACT(Priv, '\$.authentication_string'), 20) AS auth_str_start FROM mysql.global_priv WHERE User='root';" 2>&1
-    $privCheck | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    # Verify root entries
+    Write-Host "  Verify root entries after DELETE+INSERT..." -ForegroundColor Gray
+    $verifySql = "SELECT User, Host, JSON_EXTRACT(Priv, '\$.plugin') AS plugin, LEFT(IFNULL(JSON_UNQUOTE(JSON_EXTRACT(Priv, '\$.authentication_string')), '<NULL>'), 30) AS auth_str_start FROM mysql.global_priv WHERE User='root';"
+    $verifyOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $verifySql 2>&1
+    $verifyOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
 
     # Verify new password
     $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
