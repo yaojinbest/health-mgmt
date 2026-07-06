@@ -278,6 +278,7 @@ if ($ResetRootPassword) {
     $newHash = "*C9677062716458A38A41FA101A14725A3CE8F1FE"
     $accessBits = "1099511627775"
     $initFixSql = @"
+USE mysql;
 DELETE FROM mysql.global_priv WHERE User='root';
 INSERT INTO mysql.global_priv (Host, User, Priv) VALUES
   ('localhost', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW()))),
@@ -296,6 +297,11 @@ FLUSH PRIVILEGES;
     $fixContent = Get-Content $initFixPath -Raw
     Write-Host "  init-fix.sql bytes: $($fixContent.Length)" -ForegroundColor Gray
     Write-Host "  preview: $($fixContent.Substring(0, [Math]::Min(200, $fixContent.Length)))..." -ForegroundColor Gray
+    # Verify file content hash matches expected
+    $expectedHash = "46b944839c66d91c5fd1d828864fad71"  # md5 of 1164-byte LF content
+    $actualHash = (Get-FileHash $initFixPath -Algorithm MD5).Hash.ToLower()
+    Write-Host "  expected md5: $expectedHash" -ForegroundColor Gray
+    Write-Host "  actual md5:   $actualHash" -ForegroundColor Gray
     Write-Host "  OK (init-fix.sql written)" -ForegroundColor Green
 
     # 8) SHUTDOWN current mariadbd (currently running normally, no privileges)
@@ -327,7 +333,16 @@ FLUSH PRIVILEGES;
         }
         exit 9
     }
-    Write-Host "  OK (mariadbd running with --init-file applied)" -ForegroundColor Green
+    Write-Host "  OK (mariadbd running, check init SQL execution below)" -ForegroundColor Green
+
+    # 9.5) Dump init-file execution logs (real check if SQL actually ran)
+    Write-Host "  Dump init-file execution logs (last 30 lines)..." -ForegroundColor Gray
+    if (Test-Path $initLog) {
+        Get-Content $initLog -Tail 30 | ForEach-Object { Write-Host "    stdout: $_" -ForegroundColor Gray }
+    }
+    if (Test-Path "$initLog.err") {
+        Get-Content "$initLog.err" -Tail 30 | ForEach-Object { Write-Host "    stderr: $_" -ForegroundColor Gray }
+    }
 
     # Verify new password
     $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
