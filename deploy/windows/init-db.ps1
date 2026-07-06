@@ -1,429 +1,154 @@
-﻿#Requires -RunAsAdministrator
-<#
-.SYNOPSIS
-  init-db.ps1 - MariaDB database init script (health-mgmt v3.2.10)
-.DESCRIPTION
-  2 modes:
-  1. Normal: test conn, run init.sql (DROP+CREATE+seed)
-  2. -ResetRootPassword: crack/reset MariaDB root password via mysql_install_db in NEW datadir
+﻿# ============================================================================
+#  init-db.ps1 - MariaDB / MySQL 一键初始化（健康管理系统 v3）
+# ============================================================================
+#
+#  作用:
+#    1. 创建 health_management 库 (utf8mb4)
+#    2. 导入 sql/init.sql (15 张表 + 15 份 seed 数据)
+#
+#  用法 (管理员 PowerShell):
+#    PS> .\init-db.ps1                 # 默认: 127.0.0.1:3306, root, 提示输入密码
+#    PS> .\init-db.ps1 -DbPassword root   # 直接传密码 (不安全, 留 history)
+#    PS> .\init-db.ps1 -DbPort 3305       # 端口不是 3306
+#    PS> .\init-db.ps1 -DbPassword opck2026  # 跟 application.yml 一致
+#
+#  OPC_K 部署 SOP (2026-07-06):
+#    1. 文件加 UTF-8 BOM (本脚本已带)
+#    2. sql 文件加 UTF-8 BOM (sql/init.sql 已带)
+#    3. mysql 命令加 --default-character-set=utf8mb4 (本脚本已带)
+#    4. 杀进程用 Get-Process + Stop-Process (PowerShell 原生 API, 不抛错)
+#    5. 不用 < 重定向, 用 Get-Content | mysql 管道
+#
+#  历史踩坑 (2026-07-05/06):
+#    - 默认端口从 3305 改为 3306 (跟 application.yml 对齐)
+#    - password 不再走 $env:MYSQL_PWD (PowerShell 5.1 不生效), 改用参数
+#    - 杀进程从 taskkill 改为 Get-Process (管道里 -ErrorAction 不生效)
+#    - 加 --default-character-set=utf8mb4 (init.sql 中文注释不乱码)
+# ============================================================================
 
-  Usage:
-    .\init-db.ps1                          # interactive
-    .\init-db.ps1 -DbPassword opck2026     # direct
-    .\init-db.ps1 -ResetRootPassword       # force reset
-    .\init-db.ps1 -DbPassword opck2026 -ResetRootPassword
-.NOTES
-  v3.2.10:
-  - mysql_install_db.exe requires EMPTY datadir
-  - Strategy: backup old datadir, create NEW datadir in temp, install_db in new,
-    copy health_management/ from backup to new, point mariadbd to new datadir
-  - JDBC URL in application.yml doesn't need change (still localhost:3306)
-#>
-
+[CmdletBinding()]
 param(
+    [string]$DbHost = "127.0.0.1",
+    [int]$DbPort = 3306,
+    [string]$DbName = "health_management",
+    [string]$DbUser = "root",
     [string]$DbPassword = "",
-    [switch]$ResetRootPassword
+    [string]$ProjectRoot = "..\..",
+    [string]$MysqlPath = ""
 )
 
-# ---- Config ----
-$DbHost = "127.0.0.1"
-$DbPort = 3306
-$DbUser = "root"
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$rootDir   = (Get-Item $scriptDir).Parent.Parent
-$InitSql   = Join-Path $rootDir "sql\init.sql"
-$mariadbBase = "C:\Program Files\MariaDB 11.8"
-$mariadbdExe = Join-Path $mariadbBase "bin\mariadbd.exe"
-$mysqlExe    = Join-Path $mariadbBase "bin\mysql.exe"
-$mariadbInstallDbExe = Join-Path $mariadbBase "bin\mysql_install_db.exe"
+# UTF-8 BOM 必备
+$ErrorActionPreference = "Stop"
+$OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-if (-not (Test-Path $mysqlExe)) {
-    $candidates = Get-ChildItem "C:\Program Files\MariaDB*" -Directory -ErrorAction SilentlyContinue |
-                  Where-Object { (Test-Path (Join-Path $_.FullName "bin\mariadbd.exe")) }
-    if ($candidates) {
-        $mariadbBase = $candidates[0].FullName
-        $mariadbdExe = Join-Path $mariadbBase "bin\mariadbd.exe"
-        $mysqlExe    = Join-Path $mariadbBase "bin\mysql.exe"
-        $mariadbInstallDbExe = Join-Path $mariadbBase "bin\mysql_install_db.exe"
-    }
+# ---- 路径定位 ----
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$InitSql = Join-Path (Resolve-Path $ProjectRoot) "sql/init.sql"
+if (-not (Test-Path $InitSql)) {
+    Write-Host "[FAIL] 找不到 sql/init.sql, 请确认 $InitSql 存在" -ForegroundColor Red
+    exit 1
 }
 
-# Default password
+# ---- 找 mysql.exe (PATH → 常见安装位置) ----
+$mysqlExe = ""
+if ($MysqlPath -and (Test-Path $MysqlPath)) {
+    $mysqlExe = (Get-Item $MysqlPath).FullName
+} else {
+    try {
+        $whereOut = & where.exe mysql 2>$null | Select-Object -First 1
+        if ($whereOut -and (Test-Path $whereOut)) {
+            $mysqlExe = (Get-Item $whereOut).FullName
+        }
+    } catch {}
+    if (-not $mysqlExe) {
+        $cmd = Get-Command mysql -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $mysqlExe = if ($cmd.Source) { $cmd.Source } elseif ($cmd.Path) { $cmd.Path } else { "" }
+            if ($mysqlExe -and -not (Test-Path $mysqlExe)) { $mysqlExe = "" }
+        }
+    }
+    if (-not $mysqlExe) {
+        $candidates = @(
+            "C:\Program Files\MariaDB*\bin\mysql.exe",
+            "C:\Program Files (x86)\MariaDB*\bin\mysql.exe",
+            "C:\Program Files\MySQL\MySQL Server*\bin\mysql.exe",
+            "D:\Program Files\MariaDB*\bin\mysql.exe"
+        )
+        foreach ($p in $candidates) {
+            $found = Get-Item $p -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $mysqlExe = $found.FullName; break }
+        }
+    }
+}
+if (-not $mysqlExe) {
+    Write-Host "[FAIL] 找不到 mysql.exe" -ForegroundColor Red
+    Write-Host "  请确认 MariaDB / MySQL 已安装, 或用 -MysqlPath 指定" -ForegroundColor Yellow
+    exit 1
+}
+Write-Host "mysql: $mysqlExe" -ForegroundColor Cyan
+Write-Host "host:  $DbHost`:$DbPort" -ForegroundColor Cyan
+
+# ---- 密码处理 (不再走 $env:MYSQL_PWD) ----
 if (-not $DbPassword) {
-    $secure = Read-Host "Enter $DbUser password (empty=reset flow)" -AsSecureString
+    $secure = Read-Host "请输入 $DbUser 密码" -AsSecureString
     $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
     $DbPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-    if (-not $DbPassword) {
-        $DbPassword = "opck2026"
-        Write-Host "[INFO] Empty password, auto-enable -ResetRootPassword" -ForegroundColor Cyan
-        $ResetRootPassword = $true
-    }
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+}
+if (-not $DbPassword) {
+    Write-Host "[FAIL] 密码不能为空" -ForegroundColor Red
+    exit 1
 }
 
-Write-Host "mysql: $mysqlExe" -ForegroundColor Gray
-Write-Host "host:  $DbHost`:$DbPort" -ForegroundColor Gray
-Write-Host "target password: ********" -ForegroundColor Gray
-
-# ---- Find MariaDB service name (dynamic) ----
-$MariaService = $null
-try {
-    $svcList = & sc.exe query state= all 2>$null | Select-String "SERVICE_NAME:.*MariaDB" | ForEach-Object {
-        if ($_ -match "SERVICE_NAME:\s*(\S+)") { $matches[1] }
-    }
-    if ($svcList) { $MariaService = $svcList | Select-Object -First 1 }
-} catch {}
-if (-not $MariaService) { $MariaService = "MariaDB" }
-
-# ---- Test connection ----
-Write-Host "Test connection $DbHost`:$DbPort ..." -ForegroundColor Cyan
+# ---- 测试连接 ----
+Write-Host "测试数据库连接 $DbHost`:$DbPort ..." -ForegroundColor Cyan
 $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
 if ($LASTEXITCODE -ne 0) {
-    if ($testOut -match "1045" -or $testOut -match "Access denied") {
-        if (-not $ResetRootPassword) {
-            Write-Host "[WARN] Access denied. Auto-enable -ResetRootPassword..." -ForegroundColor Yellow
-            $ResetRootPassword = $true
-        }
-    } elseif ($testOut -match "10061" -or $testOut -match "Can't connect" -or $testOut -match "Connection refused") {
-        if (-not $ResetRootPassword) {
-            Write-Host "[WARN] Service not running (10061), auto-enable -ResetRootPassword..." -ForegroundColor Yellow
-            $ResetRootPassword = $true
-        }
-    } else {
-        Write-Host "[FAIL] Connection failed:" -ForegroundColor Red
-        $testOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-        exit 2
-    }
-} else {
-    Write-Host "OK" -ForegroundColor Green
-}
-
-# ---- -ResetRootPassword flow (v3.2.10, mysql_install_db in NEW datadir) ----
-if ($ResetRootPassword) {
+    Write-Host "[FAIL] 连接失败:" -ForegroundColor Red
+    $testOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
     Write-Host ""
-    Write-Host "==== -ResetRootPassword flow ====" -ForegroundColor Cyan
-    Write-Host "Target: reset $DbUser to -DbPassword" -ForegroundColor Gray
-    Write-Host "Method: mysql_install_db in NEW datadir + copy health_management back" -ForegroundColor Gray
-    Write-Host "Note: only the mysql system database is recreated, user databases preserved" -ForegroundColor Gray
-
-    if (-not (Test-Path $mariadbdExe)) {
-        Write-Host "[FAIL] mariadbd.exe not found, cannot reset" -ForegroundColor Red
-        exit 5
-    }
-    if (-not (Test-Path $mariadbInstallDbExe)) {
-        Write-Host "[FAIL] mysql_install_db.exe not found at: $mariadbInstallDbExe" -ForegroundColor Red
-        exit 5
-    }
-
-    # 1) Kill all mariadbd/mysqld/mysql
-    Write-Host "1) Kill all mariadbd/mysqld/mysql processes..." -ForegroundColor Cyan
-    $svc = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
-    if ($svc -and $svc.Status -eq "Running") {
-        Stop-Service -Name $MariaService -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-    }
-    foreach ($name in @("mariadbd.exe", "mysqld.exe", "mysql.exe")) {
-        & taskkill.exe /F /IM $name /T 2>&1 | Out-Null
-    }
-    Start-Sleep -Seconds 3
-
-    $portBusy = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-    if ($portBusy) {
-        $pids = $portBusy.OwningProcess | Sort-Object -Unique
-        Write-Host "  Port $DbPort still busy (PID: $($pids -join ',')), kill by PID..." -ForegroundColor Yellow
-        foreach ($pid in $pids) {
-            $procName = (Get-Process -Id $pid -ErrorAction SilentlyContinue).ProcessName
-            Write-Host "    PID $pid = $procName" -ForegroundColor Gray
-            & taskkill.exe /F /PID $pid /T 2>&1 | Out-Null
-        }
-        Start-Sleep -Seconds 3
-    }
-    $portBusy2 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-    if ($portBusy2) {
-        $pids2 = $portBusy2.OwningProcess | Sort-Object -Unique
-        $procs2 = $pids2 | ForEach-Object { "PID $_ = $((Get-Process -Id $_ -EA SilentlyContinue).ProcessName)" }
-        Write-Host "  [FAIL] Port $DbPort still busy: $($procs2 -join '; ')" -ForegroundColor Red
-        exit 8
-    }
-    Write-Host "  OK (port $DbPort free)" -ForegroundColor Green
-
-    # 2) Find OLD datadir
-    $oldDataDir = "C:\Program Files\MariaDB 11.8\data"
-    if (-not (Test-Path $oldDataDir)) {
-        $candidates = Get-ChildItem "C:\Program Files\MariaDB*" -Directory -ErrorAction SilentlyContinue
-        if ($candidates) {
-            $oldDataDir = $candidates[0].FullName + "\data"
-        }
-    }
-    Write-Host "2) OLD datadir: $oldDataDir" -ForegroundColor Gray
-
-    # 3) Define NEW datadir (empty, in temp) and copy health_management + other user dbs
-    Write-Host "3) Prepare NEW datadir in temp..." -ForegroundColor Cyan
-    $newDataDir = "C:/Users/84918/AppData/Local/Temp/mariadb-new-data"
-    $oldDataDirFs = $newDataDir -replace "/", "\"
-    if (Test-Path $newDataDir) {
-        Write-Host "  Clean NEW datadir: $newDataDir" -ForegroundColor Gray
-        Remove-Item -Path $newDataDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    New-Item -ItemType Directory -Path $newDataDir -Force | Out-Null
-    Write-Host "  OK (NEW datadir ready: $newDataDir)" -ForegroundColor Green
-
-    # 4) Run mysql_install_db.exe in NEW datadir
-    Write-Host "4) Run mysql_install_db.exe --datadir=NEW_DIR ..." -ForegroundColor Cyan
-    $installLog = Join-Path $env:TEMP "mysql-install-db.log"
-    $installArgs = @("--datadir=`"$newDataDir`"")
-    Write-Host "  args: $installArgs" -ForegroundColor Gray
-    $installOut = & $mariadbInstallDbExe @installArgs 2>&1
-    $installExit = $LASTEXITCODE
-    Write-Host "  exit code: $installExit" -ForegroundColor Gray
-    $installOut | Select-Object -First 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-    if ($installExit -ne 0) {
-        Write-Host "  [FAIL] mysql_install_db failed" -ForegroundColor Red
-        exit 13
-    }
-    Write-Host "  OK (NEW mysql system db created, default root has empty password)" -ForegroundColor Green
-
-    # 5) Copy user databases (health_management, etc.) from OLD to NEW datadir
-    #    CRITICAL: only copy user db directories, NOT any system files
-    #    (InnoDB undo/log files, sys schemas, mysql system db all corrupt if copied)
-    Write-Host "5) Copy user databases (health_management, ...) from OLD to NEW datadir..." -ForegroundColor Cyan
-    $oldItems = Get-ChildItem -Path $oldDataDir -ErrorAction SilentlyContinue
-    # System files/dirs that MUST NOT be copied (let mariadbd recreate)
-    $systemPatterns = @(
-        "mysql",                    # System database
-        "performance_schema",       # System schema
-        "sys",                      # System schema
-        "test",                     # Default test db
-        "ibdata1",                  # InnoDB system tablespace
-        "ib_logfile*",              # InnoDB redo logs
-        "ibtmp1",                   # InnoDB temp tablespace
-        "ib_buffer_pool",           # InnoDB buffer pool cache
-        "undo001", "undo002", "undo003",  # InnoDB undo tablespaces
-        "aria_log.*", "aria_log_control", # Aria engine logs
-        "tc.log", "multi-master.info",    # Misc
-        "my.ini", "my.cnf",         # Config (let mariadbd recreate or use --defaults-file)
-        "*.err", "*.pid",           # Old logs
-        "ddl_recovery*.log",
-        "private_key.pem", "public_key.pem",  # SSL certs
-        "binlog.*",                 # Binary logs
-        "relay-log.*",              # Relay logs
-        "master.info", "relay-log.info"
-    )
-    $copied = 0
-    foreach ($item in $oldItems) {
-        $isSystem = $false
-        foreach ($pat in $systemPatterns) {
-            if ($item.Name -like $pat) {
-                $isSystem = $true
-                break
-            }
-        }
-        if ($isSystem) {
-            Write-Host "  Skip system file: $($item.Name)" -ForegroundColor Gray
-            continue
-        }
-        $src = $item.FullName
-        $dst = Join-Path $newDataDir $item.Name
-        Write-Host "  Copy: $($item.Name)" -ForegroundColor Gray
-        Copy-Item -Path $src -Destination $dst -Recurse -Force -ErrorAction SilentlyContinue
-        $copied++
-    }
-    Write-Host "  OK ($copied user db items copied)" -ForegroundColor Green
-
-    # 6) Start mariadbd pointing at NEW datadir
-    Write-Host "6) Start mariadbd --datadir=NEW_DIR (wait 8s)..." -ForegroundColor Cyan
-    $normalLog = Join-Path $env:TEMP "mariadbd-normal.log"
-    $normalArgString = "--datadir=`"$newDataDir`" --port=$DbPort --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
-    Write-Host "  args: $normalArgString" -ForegroundColor Gray
-    $procN = Start-Process -FilePath $mariadbdExe `
-        -ArgumentList $normalArgString `
-        -RedirectStandardOutput $normalLog `
-        -RedirectStandardError "$normalLog.err" `
-        -WindowStyle Hidden -PassThru
-    Write-Host "  PID: $($procN.Id)" -ForegroundColor Gray
-    Start-Sleep -Seconds 8
-
-    $portNow = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-    if (-not $portNow) {
-        Write-Host "  [FAIL] mariadbd not listening on $DbPort, see log: $normalLog.err" -ForegroundColor Red
-        if (Test-Path "$normalLog.err") {
-            Get-Content "$normalLog.err" -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-        }
-        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-        exit 9
-    }
-    Write-Host "  OK (mariadbd listening, NEW datadir active)" -ForegroundColor Green
-
-    # 7) Login with empty password (default from mysql_install_db) and ALTER USER
-    Write-Host "7) Login with empty password + ALTER USER..." -ForegroundColor Cyan
-    $emptyLogin = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAIL] Empty password login failed: $($emptyLogin -join ' ')" -ForegroundColor Red
-        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-        exit 7
-    }
-    Write-Host "  OK (empty password login works)" -ForegroundColor Green
-
-    # Diagnose: see current root entries
-    Write-Host "  Diagnose: see current root entries..." -ForegroundColor Gray
-    $diagSql = "SELECT User, Host, JSON_EXTRACT(Priv, '\$.plugin') AS plugin, LEFT(IFNULL(JSON_UNQUOTE(JSON_EXTRACT(Priv, '\$.authentication_string')), '<NULL>'), 30) AS auth_str_start FROM mysql.global_priv WHERE User='root';"
-    $diagOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $diagSql 2>&1
-    $diagOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-
-    # 7) Write init-fix.sql in NEW datadir (mariadbd must read it during init)
-    #    --init-file SQL runs as SERVER INTERNAL, bypasses user privilege checks
-    #    (mariadb 11.x mysql.global_priv is protected - root in skip-grant has only SELECT)
-    #    Pre-computed hash: PASSWORD('opck2026') = *C9677062716458A38A41FA101A14725A3CE8F1FE
-    #    access = 1099511627775 (0x0FFFFF7FF = all 30 root privilege bits, NOT 18446744073709551615 = -1)
-    #    v3.2.17: ps1 NO LONGER uses here-string (PowerShell 5.1 line-ending mangling)
-    #             instead reads deploy/windows/init-fix.sql as external file (md5 100% predictable)
-    Write-Host "7) Copy init-fix.sql + restart mariadbd with --init-file..." -ForegroundColor Cyan
-    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-    $initFixSource = Join-Path $scriptDir "init-fix.sql"
-    if (-not (Test-Path $initFixSource)) {
-        Write-Host "  [FAIL] init-fix.sql not found in $scriptDir" -ForegroundColor Red
-        Write-Host "  Please place init-fix.sql next to init-db.ps1 (md5 46b944839c66d91c5fd1d828864fad71)" -ForegroundColor Yellow
-        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-        exit 12
-    }
-    $initFixPath = Join-Path $newDataDir "init-fix.sql"
-    Write-Host "  Copy $initFixSource -> $initFixPath ..." -ForegroundColor Gray
-    # Copy-Item preserves binary content exactly (NO line-ending transformation)
-    Copy-Item -Path $initFixSource -Destination $initFixPath -Force
-    if (-not (Test-Path $initFixPath)) {
-        Write-Host "  [FAIL] Cannot copy init-fix.sql" -ForegroundColor Red
-        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-        exit 13
-    }
-    $fixContent = Get-Content $initFixPath -Raw
-    Write-Host "  init-fix.sql bytes: $($fixContent.Length)" -ForegroundColor Gray
-    Write-Host "  preview: $($fixContent.Substring(0, [Math]::Min(200, $fixContent.Length)))..." -ForegroundColor Gray
-    # Verify file content hash matches expected (100% deterministic content)
-    $expectedHash = "46b944839c66d91c5fd1d828864fad71"  # md5 of v3.2.17 init-fix.sql
-    $actualHash = (Get-FileHash $initFixPath -Algorithm MD5).Hash.ToLower()
-    Write-Host "  expected md5: $expectedHash" -ForegroundColor Gray
-    Write-Host "  actual md5:   $actualHash" -ForegroundColor Gray
-    if ($actualHash -ne $expectedHash) {
-        Write-Host "  [WARN] init-fix.sql md5 mismatch - but file copied ok. Proceeding..." -ForegroundColor Yellow
-    } else {
-        Write-Host "  OK (init-fix.sql content verified, md5 match)" -ForegroundColor Green
-    }
-
-    # 8) SHUTDOWN current mariadbd (currently running normally, no privileges)
-    Write-Host "8) SHUTDOWN current mariadbd..." -ForegroundColor Cyan
-    & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SHUTDOWN;" 2>&1 | Out-Null
-    Start-Sleep -Seconds 5
-    & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-    Start-Sleep -Seconds 2
-    Write-Host "  OK" -ForegroundColor Green
-
-    # 9) Start mariadbd --init-file (apply fix SQL as server-internal, bypass privilege check)
-    Write-Host "9) Start mariadbd --init-file (wait 10s for init SQL to run)..." -ForegroundColor Cyan
-    $initLog = Join-Path $env:TEMP "mariadbd-init.log"
-    $initArgString = "--datadir=`"$newDataDir`" --port=$DbPort --init-file=`"$initFixPath`" --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
-    Write-Host "  args: $initArgString" -ForegroundColor Gray
-    $procI = Start-Process -FilePath $mariadbdExe `
-        -ArgumentList $initArgString `
-        -RedirectStandardOutput $initLog `
-        -RedirectStandardError "$initLog.err" `
-        -WindowStyle Hidden -PassThru
-    Write-Host "  PID: $($procI.Id)" -ForegroundColor Gray
-    Start-Sleep -Seconds 10
-
-    $portNow2 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-    if (-not $portNow2) {
-        Write-Host "  [FAIL] mariadbd not listening, see log: $initLog.err" -ForegroundColor Red
-        if (Test-Path "$initLog.err") {
-            Get-Content "$initLog.err" -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-        }
-        exit 9
-    }
-    Write-Host "  OK (mariadbd running, check init SQL execution below)" -ForegroundColor Green
-
-    # 9.5) Dump init-file execution logs (real check if SQL actually ran)
-    Write-Host "  Dump init-file execution logs (last 30 lines)..." -ForegroundColor Gray
-    if (Test-Path $initLog) {
-        Get-Content $initLog -Tail 30 | ForEach-Object { Write-Host "    stdout: $_" -ForegroundColor Gray }
-    }
-    if (Test-Path "$initLog.err") {
-        Get-Content "$initLog.err" -Tail 30 | ForEach-Object { Write-Host "    stderr: $_" -ForegroundColor Gray }
-    }
-
-    # Verify new password
-    $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAIL] New password verify failed: $($testOut -join ' ')" -ForegroundColor Red
-        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-        exit 7
-    }
-    Write-Host "  [OK] New password works on TCP! Response: $($testOut -join ' ')" -ForegroundColor Green
-
-    # Verify root entries
-    Write-Host "  Verify root entries after init-file..." -ForegroundColor Gray
-    $verifySql = "SELECT User, Host, JSON_EXTRACT(Priv, '\$.plugin') AS plugin, LEFT(IFNULL(JSON_UNQUOTE(JSON_EXTRACT(Priv, '\$.authentication_string')), '<NULL>'), 30) AS auth_str_start FROM mysql.global_priv WHERE User='root';"
-    $verifyOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e $verifySql 2>&1
-    $verifyOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-
-    # 8) SHUTDOWN clean stop
-    Write-Host "8) SHUTDOWN mariadbd..." -ForegroundColor Cyan
-    & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SHUTDOWN;" 2>&1 | Out-Null
-    Start-Sleep -Seconds 5
-    & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-    Start-Sleep -Seconds 2
-    Write-Host "  OK" -ForegroundColor Green
-
-    # 9) Start MariaDB pointing at NEW datadir
-    #    Use mariadbd.exe directly with --datadir (Windows service registration uses old datadir)
-    Write-Host "9) Start mariadbd.exe (background) with NEW datadir..." -ForegroundColor Cyan
-    $directLog = Join-Path $env:TEMP "mariadbd-direct.log"
-    $directArgString = "--datadir=`"$newDataDir`" --port=$DbPort --character-set-server=utf8mb4 --console"
-    Write-Host "  args: $directArgString" -ForegroundColor Gray
-    $procD = Start-Process -FilePath $mariadbdExe `
-        -ArgumentList $directArgString `
-        -RedirectStandardOutput $directLog `
-        -RedirectStandardError "$directLog.err" `
-        -WindowStyle Hidden -PassThru
-    Write-Host "  PID: $($procD.Id)" -ForegroundColor Gray
-    Start-Sleep -Seconds 6
-
-    $portNow3 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-    if (-not $portNow3) {
-        Write-Host "  [FAIL] mariadbd failed to start, see log: $directLog.err" -ForegroundColor Red
-        if (Test-Path "$directLog.err") {
-            Get-Content "$directLog.err" -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-        }
-        exit 10
-    }
-    Write-Host "  OK (mariadbd listening on $DbPort with NEW datadir)" -ForegroundColor Green
-
-    # 10) Final verify
-    Write-Host "10) Final verify new password..." -ForegroundColor Cyan
-    $finalTest = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[FAIL] Final verify failed: $($finalTest -join ' ')" -ForegroundColor Red
-        exit 7
-    }
-    Write-Host "  OK: $($finalTest -join ' ')" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "[INFO] MariaDB is now running with NEW datadir: $newDataDir" -ForegroundColor Cyan
-    Write-Host "[INFO] The OLD datadir is preserved at: $oldDataDir (not deleted)" -ForegroundColor Cyan
-    Write-Host "[INFO] If you want to clean up, you can manually remove: $oldDataDir" -ForegroundColor Cyan
-    Write-Host "==== -ResetRootPassword flow complete ====" -ForegroundColor Cyan
-    Write-Host ""
-}
-
-# ---- Run init.sql ----
-if (-not (Test-Path $InitSql)) {
-    Write-Host "[FAIL] init.sql not found: $InitSql" -ForegroundColor Red
-    exit 4
-}
-Write-Host "Run init.sql (DROP + CREATE + 15 tables + seed)..." -ForegroundColor Cyan
-Get-Content $InitSql -Encoding UTF8 | & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[FAIL] init.sql failed, exit code $LASTEXITCODE" -ForegroundColor Red
-    exit 3
+    Write-Host "常见原因:" -ForegroundColor Yellow
+    Write-Host "  1. MariaDB / MySQL 服务没起: net start | findstr -i maria" -ForegroundColor Gray
+    Write-Host "  2. 端口不对: 试 -DbPort 3305 或 3306" -ForegroundColor Gray
+    Write-Host "  3. 密码不对: 重新输" -ForegroundColor Gray
+    Write-Host "  4. root@127.0.0.1 没授权: 见 README 7.3 故障排查" -ForegroundColor Gray
+    exit 2
 }
 Write-Host "OK" -ForegroundColor Green
 Write-Host ""
-Write-Host "==== Init complete ====" -ForegroundColor Cyan
-Write-Host "  Backend: .\start-backend.ps1" -ForegroundColor Gray
-Write-Host "  PC Web:  .\start-frontend-pc.ps1" -ForegroundColor Gray
+
+# ---- 跑 init.sql (UTF-8 BOM + utf8mb4) ----
+Write-Host "跑 init.sql (DROP + CREATE + 15 表 + seed)..." -ForegroundColor Cyan
+Get-Content $InitSql | & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] init.sql 跑失败, 退出码 $LASTEXITCODE" -ForegroundColor Red
+    exit 3
+}
+Write-Host "OK" -ForegroundColor Green
+
+# ---- 验证 ----
+Write-Host "验证..." -ForegroundColor Cyan
+$tables = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword -N -B --default-character-set=utf8mb4 -e "USE $DbName; SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DbName';" 2>&1
+$users = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword -N -B --default-character-set=utf8mb4 -e "USE $DbName; SELECT COUNT(*) FROM sys_user;" 2>&1
+
+Write-Host ""
+Write-Host "==== 验证结果 ====" -ForegroundColor Green
+Write-Host "表数: $tables (期望 15)" -ForegroundColor White
+Write-Host "用户数: $users (期望 6)" -ForegroundColor White
+Write-Host ""
+
+if ($tables -eq 15 -and $users -eq 6) {
+    Write-Host "[OK] 初始化完成! 演示账号:" -ForegroundColor Green
+    Write-Host "   - 患者:    user_wang / root" -ForegroundColor White
+    Write-Host "   - 医生:    doctor_zhang / root" -ForegroundColor White
+    Write-Host "   - 管理员:  admin / root" -ForegroundColor White
+    Write-Host ""
+    Write-Host "下一步:" -ForegroundColor Cyan
+    Write-Host "   cd $ScriptDir" -ForegroundColor White
+    Write-Host "   .\start-backend.ps1" -ForegroundColor White
+    Write-Host "   (新窗口) .\start-frontend-pc.ps1" -ForegroundColor White
+} else {
+    Write-Host "[WARN] 数量不对" -ForegroundColor Yellow
+    exit 4
+}
