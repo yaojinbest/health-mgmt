@@ -1,7 +1,7 @@
 ﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  init-db.ps1 - MariaDB database init script (health-mgmt v3.2.2)
+  init-db.ps1 - MariaDB database init script (health-mgmt v3.2.7)
 .DESCRIPTION
   2 modes:
   1. Normal: test conn, run init.sql (DROP+CREATE+seed)
@@ -13,13 +13,14 @@
     .\init-db.ps1 -ResetRootPassword       # force reset
     .\init-db.ps1 -DbPassword opck2026 -ResetRootPassword
 .NOTES
-  v3.2.2:
+  v3.2.7:
   - 修双重 BOM (Python 加 BOM 严格控制单 BOM)
-  - init-file 改用 Python 写 (UTF-8 NO BOM, ASCII only)
-  - SET PASSWORD + IDENTIFIED VIA mysql_native_password 显式改密码
-  - 路径用 forward slash 避免 Windows 解析
-  - Start-Process 用 array form 传参
-  - 20s 等待 + 显式 verify init-file 头 3 字节
+  - init-file 改用 PowerShell 写 (UTF-8 NO BOM, ASCII only)
+  - 路径 forward slash (避免 Windows 转义)
+  - Start-Process string form + backtick-quote (避免 array form 截断)
+  - 改密策略: --init-file + DELETE + INSERT mysql.global_priv
+    (覆盖 v3.2.4 ALTER USER / v3.2.5 SET PASSWORD / v3.2.6 猜密 三条失败路径)
+  - INSERT 时 password 用 PASSWORD() 函数在 init-file 内动态算 hash
 #>
 
 param(
@@ -97,13 +98,12 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "OK" -ForegroundColor Green
 }
 
-# ---- -ResetRootPassword flow (v3.2.5, --skip-grant-tables + UPDATE) ----
+# ---- -ResetRootPassword flow (v3.2.7, --init-file + DELETE/INSERT global_priv) ----
 if ($ResetRootPassword) {
     Write-Host ""
     Write-Host "==== -ResetRootPassword flow ====" -ForegroundColor Cyan
-    Write-Host "Target: reset $DbUser@localhost + $DbUser@127.0.0.1 to -DbPassword" -ForegroundColor Gray
-    Write-Host "Method: --skip-grant-tables + UPDATE mysql.global_priv" -ForegroundColor Gray
-    Write-Host "Why not --init-file: ALTER USER in init-file doesn't persist (no privilege change)" -ForegroundColor Gray
+    Write-Host "Target: reset $DbUser to -DbPassword" -ForegroundColor Gray
+    Write-Host "Method: --init-file + DELETE/INSERT mysql.global_priv (bypass DD VIEW)" -ForegroundColor Gray
 
     if (-not (Test-Path $mariadbdExe)) {
         Write-Host "[FAIL] mariadbd.exe not found, cannot reset" -ForegroundColor Red
@@ -152,97 +152,131 @@ if ($ResetRootPassword) {
     }
     Write-Host "2) datadir: $dataDir" -ForegroundColor Gray
 
-    # 3) Start mariadbd in NORMAL mode (no --skip-grant-tables)
-    #    --skip-grant-tables blocks SET PASSWORD and UPDATE (ERROR 1290)
-    #    Normal mode: use whatever root password is currently set (default = empty)
-    Write-Host "3) Start mariadbd in normal mode (wait 8s)..." -ForegroundColor Cyan
-    $skipLog = Join-Path $env:TEMP "mariadbd-skip.log"
-    $skipArgString = "--datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
-    Write-Host "  args: $skipArgString" -ForegroundColor Gray
-    $procS = Start-Process -FilePath $mariadbdExe `
-        -ArgumentList $skipArgString `
-        -RedirectStandardOutput $skipLog `
-        -RedirectStandardError "$skipLog.err" `
+    # 3) Write init-file (PowerShell .NET, UTF-8 NO BOM, ASCII only)
+    Write-Host "3) Write init-file (PowerShell, UTF-8 NO BOM, ASCII only)..." -ForegroundColor Cyan
+    $initFile = "C:/Users/84918/AppData/Local/Temp/mariadb-init-password.sql"
+    # init-file SQL strategy:
+    #   1. DELETE existing root@* rows from global_priv
+    #   2. INSERT fresh root@localhost / 127.0.0.1 / ::1 with new password hash
+    #   Note: --init-file runs after privilege system loaded but BEFORE "ready for connections"
+    #         DELETE+INSERT should persist to mysql.global_priv (real table, not VIEW)
+    $initContent = @"
+-- MariaDB 11.x password reset (--init-file, DELETE+INSERT global_priv, v3.2.7)
+-- ASCII only, no BOM
+DELETE FROM mysql.global_priv WHERE User='root';
+INSERT INTO mysql.global_priv (Host, User, Priv) VALUES
+  ('localhost', 'root', JSON_OBJECT(
+    'access', 18446744073709551615,
+    'plugin', 'mysql_native_password',
+    'authentication_string', PASSWORD('$DbPassword'),
+    'is_role', 'N',
+    'default_role', '',
+    'max_connections', 18446744073709551615,
+    'max_user_connections', 18446744073709551615,
+    'max_statement_time', 0.0
+  )),
+  ('127.0.0.1', 'root', JSON_OBJECT(
+    'access', 18446744073709551615,
+    'plugin', 'mysql_native_password',
+    'authentication_string', PASSWORD('$DbPassword'),
+    'is_role', 'N',
+    'default_role', '',
+    'max_connections', 18446744073709551615,
+    'max_user_connections', 18446744073709551615,
+    'max_statement_time', 0.0
+  )),
+  ('::1', 'root', JSON_OBJECT(
+    'access', 18446744073709551615,
+    'plugin', 'mysql_native_password',
+    'authentication_string', PASSWORD('$DbPassword'),
+    'is_role', 'N',
+    'default_role', '',
+    'max_connections', 18446744073709551615,
+    'max_user_connections', 18446744073709551615,
+    'max_statement_time', 0.0
+  ));
+FLUSH PRIVILEGES;
+SELECT 'PASSWORD_RESET_OK' AS status;
+"@
+    try {
+        $utf8NoBOM = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($initFile, $initContent, $utf8NoBOM)
+        $headBytes = [System.IO.File]::ReadAllBytes($initFile)[0..2]
+        $headHex = ($headBytes | ForEach-Object { $_.ToString('X2') }) -join ''
+        if ($headHex -eq "EFBBBF") {
+            Write-Host "  [FAIL] BOM detected in init-file! head=0x$headHex" -ForegroundColor Red
+            exit 11
+        }
+        Write-Host "  init-file written: $($initContent.Length) bytes, head=0x$headHex (no BOM)" -ForegroundColor Gray
+        Write-Host "  init-file: $initFile" -ForegroundColor Gray
+    } catch {
+        Write-Host "  [FAIL] PowerShell write init-file failed: $_" -ForegroundColor Red
+        exit 11
+    }
+
+    # 4) Start mariadbd with --init-file
+    Write-Host "4) Start mariadbd --init-file (wait 15s)..." -ForegroundColor Cyan
+    $initLog = Join-Path $env:TEMP "mariadbd-init.log"
+    $argString = "--init-file=`"$initFile`" --datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
+    Write-Host "  args: $argString" -ForegroundColor Gray
+    $proc = Start-Process -FilePath $mariadbdExe `
+        -ArgumentList $argString `
+        -RedirectStandardOutput $initLog `
+        -RedirectStandardError "$initLog.err" `
         -WindowStyle Hidden -PassThru
-    Write-Host "  PID: $($procS.Id)" -ForegroundColor Gray
-    Start-Sleep -Seconds 8
+    Write-Host "  PID: $($proc.Id), log: $initLog" -ForegroundColor Gray
+    Start-Sleep -Seconds 15
 
-    # Check ready
-    $portReady = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-    if (-not $portReady) {
-        Write-Host "  [FAIL] mariadbd not listening on $DbPort, see log: $skipLog.err" -ForegroundColor Red
-        if (Test-Path "$skipLog.err") {
-            Get-Content "$skipLog.err" -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-        }
-        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-        exit 9
-    }
-    Write-Host "  OK (mariadbd ready)" -ForegroundColor Green
-
-    # 4) Try multiple password options to find current root password
-    #    Default MariaDB 11.8 zip install: root@localhost = empty password
-    #    root@127.0.0.1 may not exist or have empty password
-    Write-Host "4) Try empty password (default MariaDB install)..." -ForegroundColor Cyan
-    $candidatePasswords = @("", "root", "opck2026")
-    $foundPwd = $null
-    foreach ($tryPwd in $candidatePasswords) {
-        Write-Host "  Try password: '$(if ($tryPwd) { '*****' } else { '(empty)' })'" -ForegroundColor Gray
-        $tryOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$tryPwd --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $foundPwd = $tryPwd
-            Write-Host "  OK (current password is: $(if ($tryPwd) { '*****' } else { '(empty)' }))" -ForegroundColor Green
-            break
+    # Check init log stdout for PASSWORD_RESET_OK
+    $sawOk = $false
+    if (Test-Path $initLog) {
+        $initStdout = Get-Content $initLog -Raw -ErrorAction SilentlyContinue
+        if ($initStdout) {
+            $short = if ($initStdout.Length -gt 600) { $initStdout.Substring(0, 600) } else { $initStdout }
+            Write-Host "  init-log stdout (first 600):" -ForegroundColor Gray
+            Write-Host "    $($short -replace "`r`n", ' | ')" -ForegroundColor Gray
+            if ($initStdout -match "PASSWORD_RESET_OK") {
+                $sawOk = $true
+            }
+        } else {
+            Write-Host "  [WARN] init-log stdout empty" -ForegroundColor Yellow
         }
     }
-    if (-not $foundPwd) {
-        Write-Host "  [FAIL] No known password works, manual reset required" -ForegroundColor Red
-        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-        exit 12
+    if (Test-Path "$initLog.err") {
+        $initStderr = Get-Content "$initLog.err" -Raw -ErrorAction SilentlyContinue
+        if ($initStderr -match "ERROR|error" -and $initStderr -notmatch "ERROR 1064") {
+            Write-Host "  init-log stderr (errors):" -ForegroundColor Red
+            Get-Content "$initLog.err" | Select-Object -First 15 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
     }
 
-    # 5) Reset password via SET PASSWORD (normal mode, should work)
-    Write-Host "5) Reset password via SET PASSWORD..." -ForegroundColor Cyan
-    $resetSql = @"
-ALTER USER 'root'@'localhost' IDENTIFIED BY '$DbPassword';
-ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
-ALTER USER 'root'@'::1' IDENTIFIED BY '$DbPassword';
-FLUSH PRIVILEGES;
-"@
-    Write-Host "  SQL: $resetSql" -ForegroundColor Gray
-    $resetOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$foundPwd --default-character-set=utf8mb4 -e $resetSql 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAIL] ALTER USER failed:" -ForegroundColor Red
-        $resetOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-        # Fallback: SET PASSWORD
-        Write-Host "  Fallback: SET PASSWORD..." -ForegroundColor Yellow
-        $fbSql = @"
-SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$DbPassword');
-SET PASSWORD FOR 'root'@'127.0.0.1' = PASSWORD('$DbPassword');
-SET PASSWORD FOR 'root'@'::1' = PASSWORD('$DbPassword');
-FLUSH PRIVILEGES;
-"@
-        $fbOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$foundPwd --default-character-set=utf8mb4 -e $fbSql 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  [FAIL] SET PASSWORD also failed:" -ForegroundColor Red
-            $fbOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-            & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-            exit 13
-        }
-        Write-Host "  OK (SET PASSWORD worked)" -ForegroundColor Green
+    # 5) Verify new password works
+    Write-Host "5) Verify new password..." -ForegroundColor Cyan
+    $testPwd = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK] New password works! Response: $($testPwd -join ' ')" -ForegroundColor Green
     } else {
-        Write-Host "  OK (ALTER USER worked)" -ForegroundColor Green
+        Write-Host "  [FAIL] New password failed: $($testPwd -join ' ')" -ForegroundColor Red
+        Write-Host "  init-log stdout last 30 lines:" -ForegroundColor Gray
+        if (Test-Path $initLog) {
+            Get-Content $initLog -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
+        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
+        Remove-Item $initFile -ErrorAction SilentlyContinue
+        exit 7
     }
 
-    # 5) SHUTDOWN clean stop (forces privileges to disk)
-    Write-Host "5) SHUTDOWN mariadbd (clean stop, flush to disk)..." -ForegroundColor Cyan
-    & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SHUTDOWN;" 2>&1 | Out-Null
+    # 6) SHUTDOWN clean stop
+    Write-Host "6) SHUTDOWN mariadbd..." -ForegroundColor Cyan
+    & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SHUTDOWN;" 2>&1 | Out-Null
     Start-Sleep -Seconds 5
     & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-    Start-Sleep -Seconds 3
+    Start-Sleep -Seconds 2
     Write-Host "  OK" -ForegroundColor Green
+    Remove-Item $initFile -ErrorAction SilentlyContinue
 
-    # 6) Start MariaDB service / mariadbd.exe (normal mode, with auth)
-    Write-Host "6) Start MariaDB (normal mode, with auth)..." -ForegroundColor Cyan
+    # 7) Start MariaDB service / mariadbd.exe (normal mode)
+    Write-Host "7) Start MariaDB (normal mode)..." -ForegroundColor Cyan
     $serviceStarted = $false
     $svc3 = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
     if ($svc3) {
@@ -258,7 +292,7 @@ FLUSH PRIVILEGES;
         }
     }
     if (-not $serviceStarted) {
-        Write-Host "  Start mariadbd.exe directly (zip install scenario)..." -ForegroundColor Cyan
+        Write-Host "  Start mariadbd.exe directly (zip install)..." -ForegroundColor Cyan
         $normalLog = Join-Path $env:TEMP "mariadbd-normal.log"
         $normalArgString = "--datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --console"
         $procN = Start-Process -FilePath $mariadbdExe `
@@ -269,9 +303,9 @@ FLUSH PRIVILEGES;
         Start-Sleep -Seconds 6
         $portNow2 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
         if ($portNow2) {
-            Write-Host "  OK (mariadbd.exe listening on $DbPort)" -ForegroundColor Green
+            Write-Host "  OK (mariadbd.exe listening)" -ForegroundColor Green
         } else {
-            Write-Host "  [FAIL] mariadbd failed to start, see log: $normalLog.err" -ForegroundColor Red
+            Write-Host "  [FAIL] mariadbd failed, see log: $normalLog.err" -ForegroundColor Red
             if (Test-Path "$normalLog.err") {
                 Get-Content "$normalLog.err" -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
             }
@@ -279,8 +313,8 @@ FLUSH PRIVILEGES;
         }
     }
 
-    # 7) Final verification with new password
-    Write-Host "7) Final verify new password..." -ForegroundColor Cyan
+    # 8) Final verify
+    Write-Host "8) Final verify new password..." -ForegroundColor Cyan
     $finalTest = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[FAIL] Final verify failed: $($finalTest -join ' ')" -ForegroundColor Red
