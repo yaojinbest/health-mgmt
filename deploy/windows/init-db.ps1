@@ -264,19 +264,24 @@ if ($ResetRootPassword) {
     Write-Host "  OK (empty password login works)" -ForegroundColor Green
 
     $alterSql = @"
-ALTER USER 'root'@'localhost' IDENTIFIED BY '$DbPassword';
-ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
-ALTER USER 'root'@'::1' IDENTIFIED BY '$DbPassword';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' IDENTIFIED BY '$DbPassword' WITH GRANT OPTION;
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' IDENTIFIED BY '$DbPassword' WITH GRANT OPTION;
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' IDENTIFIED BY '$DbPassword' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 "@
     Write-Host "  SQL: $alterSql" -ForegroundColor Gray
     $alterOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $alterSql 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAIL] ALTER USER failed: $($alterOut -join ' ')" -ForegroundColor Red
+        Write-Host "  [FAIL] GRANT failed: $($alterOut -join ' ')" -ForegroundColor Red
         & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
         exit 13
     }
-    Write-Host "  OK (ALTER USER succeeded on fresh global_priv)" -ForegroundColor Green
+    Write-Host "  OK (GRANT succeeded on fresh global_priv)" -ForegroundColor Green
+
+    # Verify root@localhost entry now has password hash
+    Write-Host "  Check root@localhost priv after GRANT..." -ForegroundColor Gray
+    $privCheck = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SELECT User, Host, JSON_EXTRACT(Priv, '\$.plugin') AS plugin, LEFT(JSON_EXTRACT(Priv, '\$.authentication_string'), 20) AS auth_str_start FROM mysql.global_priv WHERE User='root';" 2>&1
+    $privCheck | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
 
     # Verify new password
     $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
