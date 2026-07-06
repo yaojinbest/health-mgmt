@@ -276,14 +276,50 @@ FLUSH PRIVILEGES;
     }
     Write-Host "  OK" -ForegroundColor Green
 
-    Write-Host "5) 启回 MariaDB 服务 ($MariaService)..." -ForegroundColor Cyan
-    Start-Service -Name $MariaService -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 3
+    Write-Host "5) 启回 MariaDB (优先 Start-Service, 失败则用 mariadbd.exe 直接启)..." -ForegroundColor Cyan
+    # 优先 Start-Service (你装的可能是 MSI 版, 服务启动)
+    $serviceStarted = $false
     $svc3 = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
-    if ($svc3.Status -eq "Running") {
-        Write-Host "  OK (服务起来了)" -ForegroundColor Green
+    if ($svc3) {
+        Start-Service -Name $MariaService -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        $svc3 = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
+        if ($svc3.Status -eq "Running") {
+            $portNow = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
+            if ($portNow) {
+                Write-Host "  OK (服务起来了, 端口监听中)" -ForegroundColor Green
+                $serviceStarted = $true
+            } else {
+                Write-Host "  [WARN] 服务起来但 端口 $DbPort 未监听" -ForegroundColor Yellow
+            }
+        }
     } else {
-        Write-Host "  [WARN] 服务状态: $($svc3.Status), 手动启: Start-Service $MariaService" -ForegroundColor Yellow
+        Write-Host "  [WARN] 找不到服务 $MariaService (你可能是 zip 解压安装)" -ForegroundColor Yellow
+    }
+    # 兑底: 用 mariadbd.exe 直接启 (zip 安装场景)
+    if (-not $serviceStarted) {
+        Write-Host "  启 mariadbd.exe (zip 安装兑底)..." -ForegroundColor Cyan
+        $dataDir2 = "C:\Program Files\MariaDB 11.8\data"
+        if (-not (Test-Path $dataDir2)) {
+            $dataDir2 = (Get-ChildItem "C:\Program Files\MariaDB*" -Directory | Select-Object -First 1).FullName + "\data"
+        }
+        $normalLog = Join-Path $env:TEMP "mariadbd-normal.log"
+        $normalArgs = "--datadir=`"$dataDir2`" --port=$DbPort --console"
+        $procN = Start-Process -FilePath $mariadbdExe -ArgumentList $normalArgs `
+            -RedirectStandardOutput $normalLog -RedirectStandardError "$normalLog.err" `
+            -WindowStyle Hidden -PassThru
+        Start-Sleep -Seconds 6
+        $portNow2 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
+        if ($portNow2) {
+            Write-Host "  OK (mariadbd.exe 在端口 $DbPort 监听)" -ForegroundColor Green
+            $serviceStarted = $true
+        } else {
+            Write-Host "  [FAIL] mariadbd 启不起来, 看 log: $normalLog.err" -ForegroundColor Red
+            if (Test-Path "$normalLog.err") {
+                Get-Content "$normalLog.err" -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+            }
+            exit 10
+        }
     }
 
     # 5) 验证新密码能连
