@@ -269,34 +269,65 @@ if ($ResetRootPassword) {
     $diagOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $diagSql 2>&1
     $diagOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
 
-    # DELETE + INSERT into mysql.global_priv (bypass GRANT/ALTER)
-    # Use pre-computed password hash: *C9677062716458A38A41FA101A14725A3CE8F1FE
-    Write-Host "  DELETE + INSERT root into mysql.global_priv (bypass GRANT/ALTER)..." -ForegroundColor Cyan
+    # 7) Write init-fix.sql in NEW datadir (mariadbd must read it during init)
+    #    --init-file SQL runs as SERVER INTERNAL, bypasses user privilege checks
+    #    (mariadb 11.x mysql.global_priv is protected - root in skip-grant has only SELECT)
+    #    Pre-computed hash: PASSWORD('opck2026') = *C9677062716458A38A41FA101A14725A3CE8F1FE
+    #    access = 1099511627775 (0x0FFFFF7FF = all 30 root privilege bits, NOT 18446744073709551615 = -1)
+    Write-Host "7) Write init-fix.sql + restart mariadbd with --init-file..." -ForegroundColor Cyan
     $newHash = "*C9677062716458A38A41FA101A14725A3CE8F1FE"
-    $insertSql = @"
+    $accessBits = "1099511627775"
+    $initFixSql = @"
 DELETE FROM mysql.global_priv WHERE User='root';
 INSERT INTO mysql.global_priv (Host, User, Priv) VALUES
-  ('localhost', 'root', JSON_OBJECT('access', 18446744073709551615, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 18446744073709551615, 'max_user_connections', 18446744073709551615, 'max_statement_time', 0.0)),
-  ('127.0.0.1', 'root', JSON_OBJECT('access', 18446744073709551615, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 18446744073709551615, 'max_user_connections', 18446744073709551615, 'max_statement_time', 0.0)),
-  ('::1', 'root', JSON_OBJECT('access', 18446744073709551615, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 18446744073709551615, 'max_user_connections', 18446744073709551615, 'max_statement_time', 0.0));
+  ('localhost', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'version_id', 110806, 'password_last_changed', UNIX_TIMESTAMP())),
+  ('127.0.0.1', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'version_id', 110806, 'password_last_changed', UNIX_TIMESTAMP())),
+  ('::1', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'version_id', 110806, 'password_last_changed', UNIX_TIMESTAMP()));
 FLUSH PRIVILEGES;
 "@
-    Write-Host "  SQL: $insertSql" -ForegroundColor Gray
-    $insertOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $insertSql 2>&1
-    $insertExit = $LASTEXITCODE
-    $insertOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-    if ($insertExit -ne 0) {
-        Write-Host "  [FAIL] DELETE+INSERT failed" -ForegroundColor Red
+    $initFixPath = Join-Path $newDataDir "init-fix.sql"
+    Write-Host "  Write $initFixPath ..." -ForegroundColor Gray
+    [System.IO.File]::WriteAllText($initFixPath, $initFixSql, [System.Text.UTF8Encoding]::new($false))
+    if (-not (Test-Path $initFixPath)) {
+        Write-Host "  [FAIL] Cannot write init-fix.sql" -ForegroundColor Red
         & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
         exit 13
     }
-    Write-Host "  OK (DELETE+INSERT succeeded)" -ForegroundColor Green
+    $fixContent = Get-Content $initFixPath -Raw
+    Write-Host "  init-fix.sql bytes: $($fixContent.Length)" -ForegroundColor Gray
+    Write-Host "  preview: $($fixContent.Substring(0, [Math]::Min(200, $fixContent.Length)))..." -ForegroundColor Gray
+    Write-Host "  OK (init-fix.sql written)" -ForegroundColor Green
 
-    # Verify root entries
-    Write-Host "  Verify root entries after DELETE+INSERT..." -ForegroundColor Gray
-    $verifySql = "SELECT User, Host, JSON_EXTRACT(Priv, '\$.plugin') AS plugin, LEFT(IFNULL(JSON_UNQUOTE(JSON_EXTRACT(Priv, '\$.authentication_string')), '<NULL>'), 30) AS auth_str_start FROM mysql.global_priv WHERE User='root';"
-    $verifyOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $verifySql 2>&1
-    $verifyOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    # 8) SHUTDOWN current mariadbd (currently running normally, no privileges)
+    Write-Host "8) SHUTDOWN current mariadbd..." -ForegroundColor Cyan
+    & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SHUTDOWN;" 2>&1 | Out-Null
+    Start-Sleep -Seconds 5
+    & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
+    Start-Sleep -Seconds 2
+    Write-Host "  OK" -ForegroundColor Green
+
+    # 9) Start mariadbd --init-file (apply fix SQL as server-internal, bypass privilege check)
+    Write-Host "9) Start mariadbd --init-file (wait 10s for init SQL to run)..." -ForegroundColor Cyan
+    $initLog = Join-Path $env:TEMP "mariadbd-init.log"
+    $initArgString = "--datadir=`"$newDataDir`" --port=$DbPort --init-file=`"$initFixPath`" --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
+    Write-Host "  args: $initArgString" -ForegroundColor Gray
+    $procI = Start-Process -FilePath $mariadbdExe `
+        -ArgumentList $initArgString `
+        -RedirectStandardOutput $initLog `
+        -RedirectStandardError "$initLog.err" `
+        -WindowStyle Hidden -PassThru
+    Write-Host "  PID: $($procI.Id)" -ForegroundColor Gray
+    Start-Sleep -Seconds 10
+
+    $portNow2 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
+    if (-not $portNow2) {
+        Write-Host "  [FAIL] mariadbd not listening, see log: $initLog.err" -ForegroundColor Red
+        if (Test-Path "$initLog.err") {
+            Get-Content "$initLog.err" -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
+        exit 9
+    }
+    Write-Host "  OK (mariadbd running with --init-file applied)" -ForegroundColor Green
 
     # Verify new password
     $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
@@ -306,6 +337,12 @@ FLUSH PRIVILEGES;
         exit 7
     }
     Write-Host "  [OK] New password works on TCP! Response: $($testOut -join ' ')" -ForegroundColor Green
+
+    # Verify root entries
+    Write-Host "  Verify root entries after init-file..." -ForegroundColor Gray
+    $verifySql = "SELECT User, Host, JSON_EXTRACT(Priv, '\$.plugin') AS plugin, LEFT(IFNULL(JSON_UNQUOTE(JSON_EXTRACT(Priv, '\$.authentication_string')), '<NULL>'), 30) AS auth_str_start FROM mysql.global_priv WHERE User='root';"
+    $verifyOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e $verifySql 2>&1
+    $verifyOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
 
     # 8) SHUTDOWN clean stop
     Write-Host "8) SHUTDOWN mariadbd..." -ForegroundColor Cyan
