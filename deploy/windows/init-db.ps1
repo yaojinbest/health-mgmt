@@ -174,27 +174,29 @@ if ($ResetRootPassword) {
         exit 5
     }
 
-    # 1) 停 MariaDB 服务
-    Write-Host "1) 停 MariaDB 服务 ($MariaService)..." -ForegroundColor Cyan
+    # 1) 强杀所有 mariadbd 进程 (包括服务启动的)
+    Write-Host "1) 强杀所有 mariadbd 进程 (Stop-Service + taskkill /F)..." -ForegroundColor Cyan
     $svc = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
-    if ($svc) {
-        if ($svc.Status -eq "Running") {
-            Stop-Service -Name $MariaService -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 3
-        }
-        $svc2 = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
-        if ($svc2.Status -eq "Stopped") {
-            Write-Host "  OK (已停)" -ForegroundColor Green
-        } else {
-            Write-Host "  [WARN] 服务没完全停, 尝试 Stop-Process..." -ForegroundColor Yellow
-            $proc = Get-Process -Name mariadbd -ErrorAction SilentlyContinue
-            if ($proc) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }
-        }
-    } else {
-        Write-Host "  [WARN] 找不到服务 $MariaService, 尝试 Stop-Process mariadbd" -ForegroundColor Yellow
-        $proc = Get-Process -Name mariadbd -ErrorAction SilentlyContinue
-        if ($proc) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }
+    if ($svc -and $svc.Status -eq "Running") {
+        Stop-Service -Name $MariaService -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
     }
+    # 用 taskkill /F 兜底 (Get-Process 有时拿不到所有 mariadbd)
+    $killOut = & taskkill.exe /F /IM mariadbd.exe /T 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  OK (taskkill 杀: $($killOut -join ' ' | Out-String).Trim())" -ForegroundColor Green
+    } else {
+        Write-Host "  (taskkill 无需杀或失败: $killOut)" -ForegroundColor Gray
+    }
+    Start-Sleep -Seconds 3
+    # 验证端口已空
+    $portBusy = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
+    if ($portBusy) {
+        Write-Host "  [FAIL] 端口 $DbPort 仍被占, 残余进程: $($portBusy.OwningProcess -join ',')" -ForegroundColor Red
+        Write-Host "  请手动跑: taskkill /F /IM mariadbd.exe /T  后重试" -ForegroundColor Yellow
+        exit 8
+    }
+    Write-Host "  OK (端口 $DbPort 空闲)" -ForegroundColor Green
 
     # 2) 启 mariadbd --skip-grant-tables --skip-networking (后台)
     Write-Host "2) 启 mariadbd --skip-grant-tables --skip-networking..." -ForegroundColor Cyan
@@ -203,13 +205,26 @@ if ($ResetRootPassword) {
         $dataDir = (Get-ChildItem "C:\Program Files\MariaDB*" -Directory | Select-Object -First 1).FullName + "\data"
     }
     $grantLog = Join-Path $env:TEMP "mariadbd-grant.log"
-    $grantArgs = "--skip-grant-tables --skip-networking --datadir=`"$dataDir`" --port=$DbPort"
+    $grantArgs = "--skip-grant-tables --skip-networking --datadir=`"$dataDir`" --port=$DbPort --console"
     Write-Host "  datadir: $dataDir" -ForegroundColor Gray
     Write-Host "  log:     $grantLog" -ForegroundColor Gray
     $proc = Start-Process -FilePath $mariadbdExe -ArgumentList $grantArgs `
         -RedirectStandardOutput $grantLog -RedirectStandardError "$grantLog.err" `
         -WindowStyle Hidden -PassThru
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 6
+
+    # 2.1) 验证 mariadbd 真起来了 (端口监听)
+    $grantListening = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
+    if (-not $grantListening) {
+        Write-Host "  [FAIL] mariadbd 启不起来, 看 log: $grantLog.err" -ForegroundColor Red
+        if (Test-Path "$grantLog.err") {
+            Get-Content "$grantLog.err" -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
+        # 清理可能部分启的进程
+        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
+        exit 9
+    }
+    Write-Host "  OK (mariadbd 在端口 $DbPort 监听)" -ForegroundColor Green
 
     # 3) 连 (免密码) 改密码
     Write-Host "3) 连 mysql (免密码) 改密码..." -ForegroundColor Cyan
