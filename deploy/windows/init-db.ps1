@@ -1,4 +1,4 @@
-﻿#Requires -RunAsAdministrator
+﻿﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
   init-db.ps1 - MariaDB 数据库初始化脚本 (health-mgmt v3.2)
@@ -154,31 +154,30 @@ if ($ResetRootPassword) {
     }
     Write-Host "2) datadir: $dataDir" -ForegroundColor Gray
 
-    # 3) 写 init 文件 (UTF-8 BOM, ALTER USER 改密码)
+    # 3) 写 init 文件 (UTF-8 NO BOM, ASCII 注释, ALTER USER 改密码)
     # MariaDB 11.x: mysql.user 是 Data Dictionary VIEW, 不能 UPDATE
     # 但 --init-file 在启动时执行, 此时 server 层还没完全初始化 DD VIEW
     # 所以 ALTER USER 在 init-file 里可以工作
+    # 关键: 不加 BOM (否则 Windows GBK 读会乱码), 不用中文注释
     $initFile = Join-Path $env:TEMP "mariadb-init-password.sql"
     $initContent = @"
--- MariaDB 11.x 密码重置 (--init-file 方式)
--- 此文件在 mariadbd 启动时执行, 绕过高权限检查
+-- MariaDB 11.x password reset (--init-file mode)
+-- File is read as UTF-8 by mariadbd (--character-set-server=utf8mb4)
 ALTER USER '$DbUser'@'localhost' IDENTIFIED BY '$DbPassword';
 ALTER USER '$DbUser'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
 ALTER USER '$DbUser'@'::1' IDENTIFIED BY '$DbPassword';
 FLUSH PRIVILEGES;
 SELECT 'PASSWORD_RESET_OK' AS status;
 "@
-    # PowerShell 5.1 写文件: 加 UTF-8 BOM, 避免中文注释乱码
-    $utf8BOM = [System.Text.Encoding]::UTF8.GetPreamble()
-    $utf8Content = [System.Text.Encoding]::UTF8.GetBytes($initContent)
-    $utf8WithBOM = $utf8BOM + $utf8Content
-    [System.IO.File]::WriteAllBytes($initFile, $utf8WithBOM)
-    Write-Host "3) init-file: $initFile" -ForegroundColor Gray
+    # PowerShell 5.1 写文件: UTF-8 NO BOM (BOM 会被 Windows GBK 读成乱码)
+    $utf8NoBOM = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($initFile, $initContent, $utf8NoBOM)
+    Write-Host "3) init-file: $initFile (UTF-8 NO BOM)" -ForegroundColor Gray
 
     # 4) 用 --init-file 启动 mariadbd (后台, 等待启动完成)
     Write-Host "4) 启 mariadbd --init-file (后台启动, 等 SQL 执行完)..." -ForegroundColor Cyan
     $initLog = Join-Path $env:TEMP "mariadbd-init.log"
-    $initArgs = "--init-file=`"$initFile`" --datadir=`"$dataDir`" --port=$DbPort --console"
+    $initArgs = "--init-file=`"$initFile`" --datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
     Write-Host "  log: $initLog" -ForegroundColor Gray
     Write-Host "  args: $initArgs" -ForegroundColor Gray
     $proc = Start-Process -FilePath $mariadbdExe -ArgumentList $initArgs `
