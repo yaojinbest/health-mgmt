@@ -1,178 +1,21 @@
-# MariaDB Root 密码重置指南 (5 步法, 健康管理系统专用)
+# MariaDB Root 密码重置 (5 步法)
 
 ## 适用场景
-- 早上跑过, 下午 root 密码忘了 / 10061 后变 1045
-- 我之前 17 个版本爆破 (v3.1.x → v3.2.x) 全部跑偏
-- **正确答案就是这条 5 步法, 不需要复杂 ps1**
+- root 密码忘了 / install.ps1 报 1045
+- 想重新设 root 密码
 
-## 前置条件
-- 管理员 PowerShell 5.1
-- MariaDB 11.8 已装 (zip 或 installer 都行)
-- 知道 MariaDB 安装路径 (默认 `C:\Program Files\MariaDB 11.8\`)
-
----
-
-## Step 1: 停 service + 确认 port 空闲
+## Step 1: 停 service + 杀进程
 
 ```powershell
 net stop MariaDB
+Start-Sleep -Seconds 3
+Get-Process -Name mariadbd,mysqld -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 3
 Get-NetTCPConnection -LocalPort 3306 -State Listen -ErrorAction SilentlyContinue
 # 预期: 无输出 (port 空闲)
 ```
 
-如果 `net stop MariaDB` 失败 (service 不存在), 手动 kill:
-```powershell
-Get-Process -Name mariadbd -ErrorAction SilentlyContinue | Stop-Process -Force
-```
-
----
-
-## Step 2: 启 mariadbd 进 skip-grant-tables (前台)
-
-**管理员 PowerShell**:
-```powershell
-& "C:\Program Files\MariaDB 11.8\bin\mariadbd.exe" `
-    --datadir="C:\Program Files\MariaDB 11.8\data" `
-    --port=3306 `
-    --skip-grant-tables `
-    --character-set-server=utf8mb4 `
-    --character-set-filesystem=utf8mb4 `
-    --console
-```
-
-⚠️ **这条命令会一直前台跑**，看到 `ready for connections` 就 OK。**新开 PowerShell** 跑 Step 3。
-
----
-
-## Step 3: 连 mariadb + 改密 (新开 PowerShell)
-
-```powershell
-# 1. 空密码连
-& "C:\Program Files\MariaDB 11.8\bin\mysql.exe" -uroot -h127.0.0.1 --default-character-set=utf8mb4
-```
-
-进入 mysql 提示符后跑:
-```sql
-USE mysql;
-
--- 删除所有空密码 root
-DELETE FROM mysql.global_priv WHERE User='root';
-
--- 重建 3 个 host (localhost / 127.0.0.1 / ::1) 都用 opck2026
-INSERT INTO mysql.global_priv (Host, User, Priv) VALUES
- ('localhost', 'root', JSON_OBJECT('access', 1099511627775, 'plugin', 'mysql_native_password', 'authentication_string', '*C9677062716458A38A41FA101A14725A3CE8F1FE', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW()))),
- ('127.0.0.1', 'root', JSON_OBJECT('access', 1099511627775, 'plugin', 'mysql_native_password', 'authentication_string', '*C9677062716458A38A41FA101A14725A3CE8F1FE', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW()))),
- ('::1', 'root', JSON_OBJECT('access', 1099511627775, 'plugin', 'mysql_native_password', 'authentication_string', '*C9677062716458A38A41FA101A14725A3CE8F1FE', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW())));
-
-FLUSH PRIVILEGES;
-EXIT;
-```
-
----
-
-## Step 4: 关前台 mariadbd (回到跑前台那个 PowerShell)
-
-按 `Ctrl + C` 终止前台 mariadbd。
-
-或新开 PowerShell:
-```powershell
-Get-Process -Name mariadbd -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Seconds 3
-```
-
----
-
-## Step 5: 重启 service + 验证
-
-```powershell
-net start MariaDB
-Start-Sleep -Seconds 3
-& "C:\Program Files\MariaDB 11.8\bin\mysql.exe" -uroot -h127.0.0.1 -popck2026 --default-character-set=utf8mb4 -e "SELECT VERSION(), CURRENT_USER();"
-```
-
-**预期**:
-```
-VERSION():  11.8.8-MariaDB
-CURRENT_USER(): root@127.0.0.1
-```
-
-🎉 完成！然后跑:
-```powershell
-cd C:\Users\84918\Desktop\health-mgmt\deploy\windows
-.\init-db.ps1 -DbPassword opck2026
-```
-
----
-
-## 故障排查
-
-| 错误 | 含义 | 修法 |
-|---|---|---|
-| `ERROR 1290 ... --skip-grant-tables option` | skip-grant 模式禁 ALTER USER/SET PASSWORD | **用 DELETE+INSERT** (Step 3 上面), 不能用 ALTER USER |
-| `ERROR 1045 (28000)` | 密码错 | 重新跑 Step 3 |
-| `ERROR 2002 (HY000) ... 10061` | service 没启动 | Step 1 重新确认 / Step 5 重启 service |
-| `ERROR 1142 ... mysql.global_priv` | 试图在 skip-grant 模式 UPDATE/DELETE | DELETE 是允许的, 跳过 UPDATE |
-
----
-
-## 关键 opck2026 哈希值 (避免输错)
-
-```
-*C9677062716458A38A41FA101A14725A3CE8F1FE
-```
-
-这等于 `PASSWORD('opck2026')` 在 MariaDB 11.x 里。
-
----
-
-## 沉淀
-
-`reset-root-password.md` v1.0 (2026-07-06 21:11)
-- 作者: pm_jiaozi
-- 教训: 17 个版本爆破都是过度设计, 5 步法才是正解
-- 下次 root 密码忘了直接跑这条
----
-
-## v1.1 更新 (2026-07-06 21:13) - 3 个 PowerShell 5.1 特有坑
-
-### 坑 A: mysql 客户端 `-h127.0.0.1` 被 PowerShell 截断为 `127`
-
-**症状**:
-```
-ERROR 2005 (HY000): Unknown server host '127' (11001)
-```
-
-**原因**: PowerShell 5.1 把 `-h127.0.0.1` 当成 `-h127` + `.0.0.1` 解析
-
-**修法**: 加空格 + 双引号 → `-h "127.0.0.1"` 或 `-h "localhost"`
-
-### 坑 B: mariadbd 启动报 `ibdata1 must be writable`
-
-**症状**:
-```
-[ERROR] InnoDB: The data file './ibdata1' must be writable
-[ERROR] Aborting
-```
-
-**原因**: ibdata1 被另一个 mariadbd 进程加锁（service 没完全停 + 临时 mariadbd 还在跑）
-
-**修法**: 启 mariadbd 之前用 Get-Process 完全杀进程
-
-### 坑 C: ALTER USER 命令被 PowerShell 误识别为 here-string
-
-**症状**:
-```
-ALTER USER 'root'@'localhost' IDENTIFIED BY 'opck2026';
-                ~
-here-string 标题后面和行尾之前不允许包含任何字符
-```
-
-**原因**: PowerShell 5.1 把 `'root'@'localhost'` 的 `@'` 识别成 here-string 起始符
-
-**修法**: 用 **.sql 文件** 跑改密，不用命令行 ALTER USER
-
-### PowerShell 5.1 兼容版 Step 0 (用 .sql 文件)
+## Step 2: 准备 reset.sql (避免命令行 here-string 误识别)
 
 ```powershell
 @'
@@ -183,16 +26,66 @@ INSERT INTO mysql.global_priv (Host, User, Priv) VALUES
  ('127.0.0.1', 'root', JSON_OBJECT('access', 1099511627775, 'plugin', 'mysql_native_password', 'authentication_string', '*C9677062716458A38A41FA101A14725A3CE8F1FE', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW()))),
  ('::1', 'root', JSON_OBJECT('access', 1099511627775, 'plugin', 'mysql_native_password', 'authentication_string', '*C9677062716458A38A41FA101A14725A3CE8F1FE', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW())));
 FLUSH PRIVILEGES;
-'@ | Out-File -Encoding utf8 C:\Users\84918\Desktop\health-mgmt\deploy\windows\reset-root.sql
+'@ | Out-File -Encoding utf8 $env:TEMP\reset-root.sql
 ```
 
-> 关键: 用 `@'...'@` 单引号 here-string, 不是 `@"..."@`, 这样不被插值
+> 关键: 用 `@'...'@` 单引号 here-string (不被插值 + 不含双引号, 安全)
 
-### PowerShell 5.1 兼容版 Step 3 (用 .sql 文件)
+## Step 3: 启 mariadbd --skip-grant-tables (前台)
+
+**管理员 PowerShell**:
+```powershell
+& "C:\Program Files\MariaDB 11.8\bin\mariadbd.exe" --datadir="C:\Program Files\MariaDB 11.8\data" --port=3306 --skip-grant-tables --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console
+```
+
+⚠️ 前台跑, 看到 `ready for connections` 就 OK。**新开 PowerShell** 跑 Step 4。
+
+## Step 4: 跑 reset.sql (新开 PowerShell)
 
 ```powershell
-& "C:\Program Files\MariaDB 11.8\bin\mysql.exe" -uroot -h "127.0.0.1" --default-character-set=utf8mb4 < C:\Users\84918\Desktop\health-mgmt\deploy\windows\reset-root.sql
+& "C:\Program Files\MariaDB 11.8\bin\mysql.exe" -uroot -h "127.0.0.1" --default-character-set=utf8mb4 < $env:TEMP\reset-root.sql
 ```
 
-> 关键: `-h "127.0.0.1"` 加空格 + 双引号
+> 关键: `-h "127.0.0.1"` 加空格 + 双引号 (避免 PowerShell 5.1 截断为 '127')
 
+## Step 5: 关前台 + 重启 service + 验证
+
+回到 Step 3 的 PowerShell, 按 `Ctrl+C`
+
+```powershell
+Get-Process -Name mariadbd -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 3
+net start MariaDB
+Start-Sleep -Seconds 3
+& "C:\Program Files\MariaDB 11.8\bin\mysql.exe" -uroot -h "127.0.0.1" -popck2026 --default-character-set=utf8mb4 -e "SELECT VERSION(), CURRENT_USER();"
+```
+
+**预期**:
+```
+VERSION(): 11.8.8-MariaDB
+CURRENT_USER(): root@127.0.0.1
+```
+
+🎉 完成！然后跑 `.\install.ps1` 重新部署。
+
+---
+
+## 故障排查
+
+| 错误 | 含义 | 修法 |
+|---|---|---|
+| `ERROR 1290 ... --skip-grant-tables option` | skip-grant 模式禁 ALTER USER/SET PASSWORD | 用 DELETE+INSERT (Step 2 上面), 不能用 ALTER USER |
+| `ERROR 2005 (HY000) Unknown server host '127'` | PowerShell 截断 `-h127.0.0.1` | 用 `-h "127.0.0.1"` 加空格 + 双引号 |
+| `ERROR 2002 (HY000) ... 10061` | service 没启动 | 重新跑 Step 1 + Step 5 |
+| `ERROR 1142 ... mysql.global_priv` (UPDATE) | skip-grant 禁 UPDATE protected table | 改 DELETE+INSERT |
+| `ibdata1 must be writable` | mariadbd 进程没退干净 | Get-Process 强杀 + 等 3 秒 |
+
+---
+
+## 关键 opck2026 哈希
+
+```
+*C9677062716458A38A41FA101A14725A3CE8F1FE
+```
+
+这等于 `PASSWORD('opck2026')` 在 MariaDB 11.x 里。
