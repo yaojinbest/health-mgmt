@@ -86,6 +86,8 @@ Get-Content D:\fix.sql | & "C:\Program Files\MariaDB 11.8\bin\mysql.exe" -h 127.
 > 🔔 **端口**: 本项目用 `3306` (默认 MariaDB 端口, 跟 application.yml 对齐)。如有冲突, 改 `application.yml`。
 >
 > 🔔 **v3.0 变更**: 端口从 3305 → 3306, 默认密码从空 → `opck2026` (application.yml 一致), 8 个真机坑永久修复。
+>
+> 🔔 **v3.1 变更** (2026-07-06): `init-db.ps1` 加 `-ResetRootPassword` 开关。忘密码 / 密码不一致, 脚本一键重置。不需手动启停 MariaDB 服务。
 
 ---
 
@@ -148,7 +150,13 @@ FLUSH PRIVILEGES;
 
 ```powershell
 cd 健康管理系统\deploy\windows
-.\init-db.ps1
+
+# 场景 A: 你记得 MariaDB root 密码 (首次装 / 已设 opck2026)
+.\init-db.ps1 -DbPassword opck2026
+
+# 场景 B: 忘了 root 密码 / 密码不一致 → 脚本一键重置
+.\init-db.ps1 -ResetRootPassword -DbPassword opck2026
+# 脚本会自动停 MariaDB, --skip-grant-tables 启动, 跑 ALTER USER, 重启服务
 ```
 
 **预期输出**:
@@ -305,6 +313,21 @@ Get-NetTCPConnection -LocalPort 8090 -State Listen
 Stop-Process -Id <PID> -Force
 ```
 
+### 8.9 ⭐ init-db 报 "Access denied for user 'root'@'localhost'"
+**坑 #11** (7/6 15:19 踩坑): MariaDB root 密码不知道 / 跟 application.yml 不一致
+**修复** (本项目已修): init-db.ps1 加 `-ResetRootPassword` 开关
+```powershell
+# 一键重置 root 密码为 opck2026
+.\init-db.ps1 -ResetRootPassword -DbPassword opck2026
+```
+脚本会自动:
+1. 停 MariaDB 服务 (Get-Service / Stop-Service)
+2. 启 mariadbd --skip-grant-tables --skip-networking (后台)
+3. 跑 ALTER USER + CREATE USER + GRANT + FLUSH PRIVILEGES
+4. 停 mariadbd, 重启 MariaDB 服务
+5. 验证新密码能连
+**这个流程不需要手启停 MariaDB, 也不需手动跑 SQL**。
+
 ---
 
 ## OPC_K PowerShell 5.1 部署 SOP (永久)
@@ -327,6 +350,12 @@ Stop-Process -Id <PID> -Force
 
 ## 修订记录
 
+- **v3.1** (2026-07-06): init-db.ps1 加 -ResetRootPassword 开关
+  - 解决 7/6 15:19 踩坑: Access denied (root 密码不一致)
+  - 脚本自动: 停 MariaDB 服务 → 启 mariadbd --skip-grant-tables → 跑 ALTER USER → 重启服务
+  - 适用: 忘 root 密码 / 密码跟 application.yml 不一致
+  - README 加 8.9 故障排查 + 步骤 2 加场景 B
+  - 修订记录 v3.1
 - **v3.0.2** (2026-07-06): 修复 PowerShell 直接跑 SQL 报 here-string 错的踩坑
   - README 顶部加 "不要在 PowerShell 直接跑 SQL" 警示 + 3 种对策
   - OPC_K PowerShell SOP 升级 11 条 (新增 #10 + #11)
