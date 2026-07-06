@@ -175,25 +175,41 @@ if ($ResetRootPassword) {
     }
 
     # 1) 强杀所有 mariadbd 进程 (包括服务启动的)
-    Write-Host "1) 强杀所有 mariadbd 进程 (Stop-Service + taskkill /F)..." -ForegroundColor Cyan
+    Write-Host "1) 强杀所有 mariadbd / mysqld 进程 (Stop-Service + taskkill + 按端口 PID 杀)..." -ForegroundColor Cyan
     $svc = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -eq "Running") {
         Stop-Service -Name $MariaService -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
     }
-    # 用 taskkill /F 兜底 (Get-Process 有时拿不到所有 mariadbd)
-    $killOut = & taskkill.exe /F /IM mariadbd.exe /T 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  OK (taskkill 杀: $($killOut -join ' ' | Out-String).Trim())" -ForegroundColor Green
-    } else {
-        Write-Host "  (taskkill 无需杀或失败: $killOut)" -ForegroundColor Gray
+    # 用 taskkill /F 杀 mariadbd / mysqld / mysql 三个名字 (覆盖所有 MySQL 变体)
+    foreach ($name in @("mariadbd.exe", "mysqld.exe", "mysql.exe")) {
+        $killOut = & taskkill.exe /F /IM $name /T 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  OK (taskkill 杀 $name)" -ForegroundColor Green
+        }
     }
-    Start-Sleep -Seconds 3
-    # 验证端口已空
+    Start-Sleep -Seconds 2
+    # 验证端口已空, 如还占用, 按监听 PID 强杀 (可能是 zip 解压启动的, taskkill 名字拿不到)
     $portBusy = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
     if ($portBusy) {
-        Write-Host "  [FAIL] 端口 $DbPort 仍被占, 残余进程: $($portBusy.OwningProcess -join ',')" -ForegroundColor Red
-        Write-Host "  请手动跑: taskkill /F /IM mariadbd.exe /T  后重试" -ForegroundColor Yellow
+        $pids = $portBusy.OwningProcess | Sort-Object -Unique
+        Write-Host "  端口 $DbPort 仍被占 (PID: $($pids -join ',')), 按 PID 强杀..." -ForegroundColor Yellow
+        foreach ($pid in $pids) {
+            # 查出进程名 (告诉进哥什么进程占着)
+            $procName = (Get-Process -Id $pid -ErrorAction SilentlyContinue).ProcessName
+            Write-Host "    PID $pid = $procName" -ForegroundColor Gray
+            & taskkill.exe /F /PID $pid /T 2>&1 | Out-Null
+        }
+        Start-Sleep -Seconds 3
+    }
+    # 最终验证
+    $portBusy2 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
+    if ($portBusy2) {
+        $pids2 = $portBusy2.OwningProcess | Sort-Object -Unique
+        $procs2 = $pids2 | ForEach-Object { "PID $_ = $((Get-Process -Id $_ -EA SilentlyContinue).ProcessName)" }
+        Write-Host "  [FAIL] 端口 $DbPort 仍被占, 残余: $($procs2 -join '; ')" -ForegroundColor Red
+        Write-Host "  可能不是 MySQL/MariaDB 进程占的, 请手动查" -ForegroundColor Yellow
+        Write-Host "  查命令: Get-NetTCPConnection -LocalPort $DbPort -State Listen | Select OwningProcess, @{n='Proc';e={(Get-Process -Id \$_.OwningProcess -EA SilentlyContinue).ProcessName}}" -ForegroundColor Gray
         exit 8
     }
     Write-Host "  OK (端口 $DbPort 空闲)" -ForegroundColor Green
