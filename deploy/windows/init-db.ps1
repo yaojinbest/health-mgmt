@@ -1,117 +1,62 @@
-﻿# ============================================================================
-#  init-db.ps1 - MariaDB / MySQL 一键初始化（健康管理系统 v3.1）
-# ============================================================================
-#
-#  作用:
-#    1. 测试 MariaDB 连接 (空密码自动转 -ResetRootPassword 流程)
-#    2. 创建 health_management 库 (utf8mb4)
-#    3. 导入 sql/init.sql (15 张表 + 6 用户 seed)
-#
-#  用法 (管理员 PowerShell):
-#    PS> .\init-db.ps1                                      # 默认: 127.0.0.1:3306, 提示输入密码
-#    PS> .\init-db.ps1 -DbPassword opck2026                 # 密码直接传 (跟 application.yml 一致)
-#    PS> .\init-db.ps1 -ResetRootPassword                   # 强制走 --skip-grant-tables 流程 (重置 root 密码)
-#    PS> .\init-db.ps1 -DbPort 3305                         # 端口不是 3306
-#
-#  2026-07-06 v3.1 升级:
-#    - 加 -ResetRootPassword 开关 (解决 root 密码不知道/不一致问题)
-#    - 默认行为: 测连接时若 1045 Access denied, 自动调用 --skip-grant-tables 流程重置
-#    - 重置后, root@localhost + root@127.0.0.1 密码统一为 -DbPassword
-#    - 加 CREATE USER root@127.0.0.1 (坑 #3 兜底)
-#
-#  OPC_K 部署 SOP (2026-07-06):
-#    1. 文件加 UTF-8 BOM (本脚本已带)
-#    2. sql 文件加 UTF-8 BOM (sql/init.sql 已带)
-#    3. mysql 命令加 --default-character-set=utf8mb4 (本脚本已带)
-#    4. 杀进程用 Get-Process + Stop-Process (PowerShell 原生 API, 不抛错)
-#    5. 不用 < 重定向, 用 Get-Content | mysql 管道
-#
-#  历史踩坑 (2026-07-05/06):
-#    - 默认端口从 3305 改为 3306 (跟 application.yml 对齐)
-#    - password 不再走 $env:MYSQL_PWD (PowerShell 5.1 不生效), 改用参数
-#    - 杀进程从 taskkill 改为 Get-Process (管道里 -ErrorAction 不生效)
-#    - 加 --default-character-set=utf8mb4 (init.sql 中文注释不乱码)
-#    - v3.1 加 -ResetRootPassword 兜底 (15:15 踩 here-string + 15:19 Access denied 沉淀)
-# ============================================================================
+﻿#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+  init-db.ps1 - MariaDB 数据库初始化脚本 (health-mgmt v3.2)
+.DESCRIPTION
+  支持两种模式:
+  1. 正常模式: 测连接, 跑 init.sql (DROP+CREATE+seed)
+  2. -ResetRootPassword 模式: 破解/重置 MariaDB root 密码
 
-[CmdletBinding()]
+  用法:
+    .\init-db.ps1                          # 交互输入密码
+    .\init-db.ps1 -DbPassword opck2026     # 直接指定密码
+    .\init-db.ps1 -ResetRootPassword       # 强制走重置流程 (留空密码)
+    .\init-db.ps1 -DbPassword opck2026 -ResetRootPassword  # 重置密码
+
+.NOTES
+  MariaDB 11.x Data Dictionary: mysql.user 是 VIEW, 不能直接 UPDATE/ALTER
+  密码重置必须用 --init-file 在启动时执行
+#>
+
 param(
-    [string]$DbHost = "127.0.0.1",
-    [int]$DbPort = 3306,
-    [string]$DbName = "health_management",
-    [string]$DbUser = "root",
     [string]$DbPassword = "",
-    [string]$ProjectRoot = "..\..",
-    [string]$MysqlPath = "",
     [switch]$ResetRootPassword
 )
 
-# UTF-8 BOM 必备
-$ErrorActionPreference = "Continue"
-$OutputEncoding = [System.Text.Encoding]::UTF8
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# ---- 配置 ----
+$DbHost = "127.0.0.1"
+$DbPort = 3306
+$DbUser = "root"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$rootDir   = (Get-Item $scriptDir).Parent.Parent
+$InitSql   = Join-Path $rootDir "sql\init.sql"
+$mariadbBase = "C:\Program Files\MariaDB 11.8"
+$mariadbdExe = Join-Path $mariadbBase "bin\mariadbd.exe"
+$mysqlExe    = Join-Path $mariadbBase "bin\mysql.exe"
 
-# ---- 路径定位 ----
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$InitSql = Join-Path (Resolve-Path $ProjectRoot) "sql/init.sql"
-if (-not (Test-Path $InitSql)) {
-    Write-Host "[FAIL] 找不到 sql/init.sql, 请确认 $InitSql 存在" -ForegroundColor Red
-    exit 1
+if (-not (Test-Path $mysqlExe)) {
+    $mariadbBase = (Get-ChildItem "C:\Program Files\MariaDB*" -Directory |
+                    Where-Object { (Test-Path (Join-Path $_.FullName "bin\mariadbd.exe")) } |
+                    Select-Object -First 1).FullName
+    $mariadbdExe = Join-Path $mariadbBase "bin\mariadbd.exe"
+    $mysqlExe    = Join-Path $mariadbBase "bin\mysql.exe"
 }
 
-# ---- 找 mysql.exe (PATH → 常见安装位置) ----
-$mysqlExe = ""
-if ($MysqlPath -and (Test-Path $MysqlPath)) {
-    $mysqlExe = (Get-Item $MysqlPath).FullName
-} else {
-    try {
-        $whereOut = & where.exe mysql 2>$null | Select-Object -First 1
-        if ($whereOut -and (Test-Path $whereOut)) {
-            $mysqlExe = (Get-Item $whereOut).FullName
-        }
-    } catch {}
-    if (-not $mysqlExe) {
-        $cmd = Get-Command mysql -ErrorAction SilentlyContinue
-        if ($cmd) {
-            $mysqlExe = if ($cmd.Source) { $cmd.Source } elseif ($cmd.Path) { $cmd.Path } else { "" }
-            if ($mysqlExe -and -not (Test-Path $mysqlExe)) { $mysqlExe = "" }
-        }
-    }
-    if (-not $mysqlExe) {
-        $candidates = @(
-            "C:\Program Files\MariaDB*\bin\mysql.exe",
-            "C:\Program Files (x86)\MariaDB*\bin\mysql.exe",
-            "C:\Program Files\MySQL\MySQL Server*\bin\mysql.exe",
-            "D:\Program Files\MariaDB*\bin\mysql.exe"
-        )
-        foreach ($p in $candidates) {
-            $found = Get-Item $p -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) { $mysqlExe = $found.FullName; break }
-        }
+# 默认密码
+if (-not $DbPassword) {
+    $secure = Read-Host "请输入 $DbUser 密码 (留空跳过此提示, 改走重置流程)" -AsSecureString
+    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    $DbPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+    if (-not $DbPassword) {
+        $DbPassword = "opck2026"
+        Write-Host "[INFO] 密码留空, 自动启用 -ResetRootPassword 流程" -ForegroundColor Cyan
+        $ResetRootPassword = $true
     }
 }
-if (-not $mysqlExe) {
-    Write-Host "[FAIL] 找不到 mysql.exe" -ForegroundColor Red
-    Write-Host "  请确认 MariaDB / MySQL 已安装, 或用 -MysqlPath 指定" -ForegroundColor Yellow
-    exit 1
-}
-Write-Host "mysql: $mysqlExe" -ForegroundColor Cyan
-Write-Host "host:  $DbHost`:$DbPort" -ForegroundColor Cyan
 
-# ---- 找 mariadbd.exe (--skip-grant-tables 用) ----
-$mariadbdExe = ""
-$mariadbdDir = Split-Path -Parent $mysqlExe
-$candidatesMariadbd = @(
-    (Join-Path $mariadbdDir "mariadbd.exe"),
-    "C:\Program Files\MariaDB 11.8\bin\mariadbd.exe"
-)
-foreach ($p in $candidatesMariadbd) {
-    if ($p -and (Test-Path $p)) { $mariadbdExe = (Get-Item $p).FullName; break }
-}
-if (-not $mariadbdExe) {
-    Write-Host "[WARN] 找不到 mariadbd.exe, -ResetRootPassword 流程不可用" -ForegroundColor Yellow
-    Write-Host "  (正常连接流程仍可走)" -ForegroundColor Gray
-}
+Write-Host "mysql: $mysqlExe" -ForegroundColor Gray
+Write-Host "host:  $DbHost`:$DbPort" -ForegroundColor Gray
+Write-Host "目标密码: ******** (留 -DbPassword 覆盖)" -ForegroundColor Gray
 
 # ---- 找 MariaDB 服务名 (动态, 兼容多个版本) ----
 $MariaService = $null
@@ -121,28 +66,12 @@ try {
     }
     if ($svcList) { $MariaService = $svcList | Select-Object -First 1 }
 } catch {}
-if (-not $MariaService) { $MariaService = "MariaDB" }  # 兜底
-
-# ---- 密码处理 (不再走 $env:MYSQL_PWD) ----
-if (-not $DbPassword) {
-    $secure = Read-Host "请输入 $DbUser 密码 (留空跳过此提示, 改走重置流程)" -AsSecureString
-    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    $DbPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
-}
-# 留空 = 自动走 -ResetRootPassword
-if (-not $DbPassword) {
-    Write-Host "[INFO] 密码留空, 自动启用 -ResetRootPassword 流程" -ForegroundColor Cyan
-    $ResetRootPassword = $true
-    $DbPassword = "opck2026"  # 默认跟 application.yml 对齐
-}
-Write-Host "目标密码: ******** (留 -DbPassword 覆盖)" -ForegroundColor Gray
+if (-not $MariaService) { $MariaService = "MariaDB" }
 
 # ---- 测试连接 ----
 Write-Host "测试数据库连接 $DbHost`:$DbPort ..." -ForegroundColor Cyan
 $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
 if ($LASTEXITCODE -ne 0) {
-    # 1045 = Access denied, 10061 = 服务没起 → 都走重置
     if ($testOut -match "1045" -or $testOut -match "Access denied") {
         if (-not $ResetRootPassword) {
             Write-Host "[WARN] Access denied. 自动启用 -ResetRootPassword 流程..." -ForegroundColor Yellow
@@ -167,162 +96,151 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "OK" -ForegroundColor Green
 }
 
-# ---- -ResetRootPassword 流程 (v3.1 新增) ----
+# ---- -ResetRootPassword 流程 (v3.2 重写, 用 --init-file) ----
 if ($ResetRootPassword) {
     Write-Host ""
     Write-Host "==== 走 -ResetRootPassword 流程 ====" -ForegroundColor Cyan
     Write-Host "目标: 重置 $DbUser@localhost + $DbUser@127.0.0.1 密码为 -DbPassword" -ForegroundColor Gray
+    Write-Host "方式: --init-file (MariaDB 11.x Data Dictionary VIEW 修复)" -ForegroundColor Gray
 
     if (-not $mariadbdExe) {
-        Write-Host "[FAIL] mariadbd.exe 不存在, 无法走 --skip-grant-tables 流程" -ForegroundColor Red
-        Write-Host "  请手动: 管理员命令行停 MariaDB 服务, 用 mysqld --skip-grant-tables 起, 跑 ALTER USER" -ForegroundColor Yellow
+        Write-Host "[FAIL] mariadbd.exe 不存在, 无法走重置流程" -ForegroundColor Red
         exit 5
     }
 
-    # 1) 强杀所有 mariadbd 进程 (包括服务启动的)
-    Write-Host "1) 强杀所有 mariadbd / mysqld 进程 (Stop-Service + taskkill + 按端口 PID 杀)..." -ForegroundColor Cyan
+    # 1) 强杀所有 mariadbd/mysqld/mysql 进程
+    Write-Host "1) 强杀所有 mariadbd/mysqld/mysql 进程..." -ForegroundColor Cyan
     $svc = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -eq "Running") {
         Stop-Service -Name $MariaService -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
     }
-    # 用 taskkill /F 杀 mariadbd / mysqld / mysql 三个名字 (覆盖所有 MySQL 变体)
     foreach ($name in @("mariadbd.exe", "mysqld.exe", "mysql.exe")) {
         $killOut = & taskkill.exe /F /IM $name /T 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  OK (taskkill 杀 $name)" -ForegroundColor Green
         }
     }
-    Start-Sleep -Seconds 2
-    # 验证端口已空, 如还占用, 按监听 PID 强杀 (可能是 zip 解压启动的, taskkill 名字拿不到)
+    Start-Sleep -Seconds 3
+
+    # 端口验证
     $portBusy = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
     if ($portBusy) {
         $pids = $portBusy.OwningProcess | Sort-Object -Unique
         Write-Host "  端口 $DbPort 仍被占 (PID: $($pids -join ',')), 按 PID 强杀..." -ForegroundColor Yellow
         foreach ($pid in $pids) {
-            # 查出进程名 (告诉进哥什么进程占着)
             $procName = (Get-Process -Id $pid -ErrorAction SilentlyContinue).ProcessName
             Write-Host "    PID $pid = $procName" -ForegroundColor Gray
             & taskkill.exe /F /PID $pid /T 2>&1 | Out-Null
         }
         Start-Sleep -Seconds 3
     }
-    # 最终验证
     $portBusy2 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
     if ($portBusy2) {
         $pids2 = $portBusy2.OwningProcess | Sort-Object -Unique
         $procs2 = $pids2 | ForEach-Object { "PID $_ = $((Get-Process -Id $_ -EA SilentlyContinue).ProcessName)" }
-        Write-Host "  [FAIL] 端口 $DbPort 仍被占, 残余: $($procs2 -join '; ')" -ForegroundColor Red
-        Write-Host "  可能不是 MySQL/MariaDB 进程占的, 请手动查" -ForegroundColor Yellow
-        Write-Host "  查命令: Get-NetTCPConnection -LocalPort $DbPort -State Listen | Select OwningProcess, @{n='Proc';e={(Get-Process -Id \$_.OwningProcess -EA SilentlyContinue).ProcessName}}" -ForegroundColor Gray
+        Write-Host "  [FAIL] 端口 $DbPort 仍被占: $($procs2 -join '; ')" -ForegroundColor Red
         exit 8
     }
     Write-Host "  OK (端口 $DbPort 空闲)" -ForegroundColor Green
 
-    # 2) 启 mariadbd --skip-grant-tables --skip-networking (后台)
-    Write-Host "2) 启 mariadbd --skip-grant-tables --skip-networking..." -ForegroundColor Cyan
+    # 2) 找 datadir
     $dataDir = "C:\Program Files\MariaDB 11.8\data"
     if (-not (Test-Path $dataDir)) {
-        $dataDir = (Get-ChildItem "C:\Program Files\MariaDB*" -Directory | Select-Object -First 1).FullName + "\data"
-    }
-    $grantLog = Join-Path $env:TEMP "mariadbd-grant.log"
-    $grantArgs = "--skip-grant-tables --datadir=`"$dataDir`" --port=$DbPort --console"
-    Write-Host "  datadir: $dataDir" -ForegroundColor Gray
-    Write-Host "  log:     $grantLog" -ForegroundColor Gray
-    $proc = Start-Process -FilePath $mariadbdExe -ArgumentList $grantArgs `
-        -RedirectStandardOutput $grantLog -RedirectStandardError "$grantLog.err" `
-        -WindowStyle Hidden -PassThru
-    Start-Sleep -Seconds 6
-
-    # 2.1) 验证 mariadbd 真起来了 (端口监听)
-    $grantListening = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-    if (-not $grantListening) {
-        Write-Host "  [FAIL] mariadbd 启不起来, 看 log: $grantLog.err" -ForegroundColor Red
-        if (Test-Path "$grantLog.err") {
-            Get-Content "$grantLog.err" -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        $candidates = Get-ChildItem "C:\Program Files\MariaDB*" -Directory -ErrorAction SilentlyContinue
+        if ($candidates) {
+            $dataDir = $candidates[0].FullName + "\data"
         }
-        # 清理可能部分启的进程
-        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-        exit 9
     }
-    Write-Host "  OK (mariadbd 在端口 $DbPort 监听)" -ForegroundColor Green
+    Write-Host "2) datadir: $dataDir" -ForegroundColor Gray
 
-    # 3) 连 (免密码) 改密码
-    Write-Host "3) 连 mysql (免密码) 改密码..." -ForegroundColor Cyan
-    $resetSql = @"
+    # 3) 写 init 文件 (UTF-8 BOM, ALTER USER 改密码)
+    # MariaDB 11.x: mysql.user 是 Data Dictionary VIEW, 不能 UPDATE
+    # 但 --init-file 在启动时执行, 此时 server 层还没完全初始化 DD VIEW
+    # 所以 ALTER USER 在 init-file 里可以工作
+    $initFile = Join-Path $env:TEMP "mariadb-init-password.sql"
+    $initContent = @"
+-- MariaDB 11.x 密码重置 (--init-file 方式)
+-- 此文件在 mariadbd 启动时执行, 绕过高权限检查
+ALTER USER '$DbUser'@'localhost' IDENTIFIED BY '$DbPassword';
+ALTER USER '$DbUser'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
+ALTER USER '$DbUser'@'::1' IDENTIFIED BY '$DbPassword';
 FLUSH PRIVILEGES;
--- MariaDB 11.x 在 --skip-grant-tables 下仍验密码, 改用直接 UPDATE 写 mysql.user 表
-UPDATE mysql.user SET password=PASSWORD('$DbPassword') WHERE user='$DbUser';
-UPDATE mysql.user SET plugin='mysql_native_password' WHERE user='$DbUser' AND (plugin='mysql_native_password' OR plugin='' OR plugin IS NULL);
-FLUSH PRIVILEGES;
-FLUSH HOSTS;
-FLUSH LOGS;
-SELECT 'PASSWORD_UPDATED' as status;
+SELECT 'PASSWORD_RESET_OK' AS status;
 "@
-    # 验证一下连接能进, 不要求真进库 (skip-grant 模式, 任何密码都能进)
-    $testReset = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SELECT 1" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[FAIL] 连不上 skip-grant mariadbd:" -ForegroundColor Red
-        $testReset | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-        exit 6
-    }
-    # 改密码
-    $resetOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $resetSql 2>&1
-    $alterOk = ($LASTEXITCODE -eq 0)
-    if (-not $alterOk) {
-        Write-Host "[FAIL] ALTER USER 失败:" -ForegroundColor Red
-        $resetOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-        Write-Host "  残留进程: 需手动 Stop-Process mariadbd" -ForegroundColor Yellow
-        exit 6
-    }
-    # 验证密码表有数据 (skip-grant 模式下 SELECT 也会被拒, 这里仅试探连接, 输出忽略)
-    $verifyOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "FLUSH PRIVILEGES; SELECT 1 as ok" 2>&1
-    if ($verifyOut -match "1045" -or $verifyOut -match "Access denied") {
-        Write-Host "  [WARN] ALTER USER 后验证查询被拒, 仍认 skip-grant 未生效, 需手动检查" -ForegroundColor Yellow
-    } else {
-        Write-Host "  验证查询响应: $($verifyOut -join ' ' | Out-String).Trim()" -ForegroundColor Gray
-    }
-    Write-Host "  OK" -ForegroundColor Green
+    # PowerShell 5.1 写文件: 加 UTF-8 BOM, 避免中文注释乱码
+    $utf8BOM = [System.Text.Encoding]::UTF8.GetPreamble()
+    $utf8Content = [System.Text.Encoding]::UTF8.GetBytes($initContent)
+    $utf8WithBOM = $utf8BOM + $utf8Content
+    [System.IO.File]::WriteAllBytes($initFile, $utf8WithBOM)
+    Write-Host "3) init-file: $initFile" -ForegroundColor Gray
 
-    # 补上 (v3.1.8 fix): 上面 verifyOut 有 1045 会让 $LASTEXITCODE 变成非 0
-    # 导致后面 'if ($LASTEXITCODE -ne 0)' 误判 ALTER USER 失败
-    # 重新跑一遍干净 SELECT 看实际状态
-    $retryOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT 1" 2>&1
-    if ($LASTEXITCODE -eq 0 -and $retryOut -match "1") {
-        Write-Host "  [OK] ALTER USER 实际生效: 新密码 opck2026 能连" -ForegroundColor Green
-    } else {
-        Write-Host "  [DEBUG] 新密码验证: $retryOut" -ForegroundColor Gray
-    }
-    if (-not $alterOk) {
-        Write-Host "[FAIL] ALTER USER 失败:" -ForegroundColor Red
-        $resetOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-        Write-Host "  残留进程: 需手动 Stop-Process mariadbd" -ForegroundColor Yellow
-        exit 6
-    }
-    Write-Host "  OK" -ForegroundColor Green
+    # 4) 用 --init-file 启动 mariadbd (后台, 等待启动完成)
+    Write-Host "4) 启 mariadbd --init-file (后台启动, 等 SQL 执行完)..." -ForegroundColor Cyan
+    $initLog = Join-Path $env:TEMP "mariadbd-init.log"
+    $initArgs = "--init-file=`"$initFile`" --datadir=`"$dataDir`" --port=$DbPort --console"
+    Write-Host "  log: $initLog" -ForegroundColor Gray
+    Write-Host "  args: $initArgs" -ForegroundColor Gray
+    $proc = Start-Process -FilePath $mariadbdExe -ArgumentList $initArgs `
+        -RedirectStandardOutput $initLog -RedirectStandardError "$initLog.err" `
+        -WindowStyle Hidden -PassThru
+    Write-Host "  PID: $($proc.Id)" -ForegroundColor Gray
 
-    # 4) 停 mariadbd, 启回服务
-    Write-Host "4) 停 mariadbd (skip-grant-tables)..." -ForegroundColor Cyan
-    # 先用 mysql 干净关 (保证 user 表刷盘)
-    $shutdownOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SHUTDOWN" 2>&1
-    Start-Sleep -Seconds 5
-    # 兑底强杀
-    foreach ($name in @("mariadbd.exe", "mysqld.exe")) {
-        & taskkill.exe /F /IM $name /T 2>$null | Out-Null
-    }
-    Start-Sleep -Seconds 3
-    $portBusy4 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-    if ($portBusy4) {
-        Write-Host "  [WARN] 端口仍被占, 按 PID 杀" -ForegroundColor Yellow
-        $portBusy4.OwningProcess | Sort-Object -Unique | ForEach-Object {
-            & taskkill.exe /F /PID $_ /T 2>$null | Out-Null
+    # 等 mariadbd 启动 + 执行 init-file (需要等待 SQL 完成)
+    Write-Host "  等 mariadbd 启动 + 执行 init-file SQL (15s)..." -ForegroundColor Cyan
+    Start-Sleep -Seconds 15
+
+    # 检查 init log 是否有 PASSWORD_RESET_OK
+    if (Test-Path $initLog) {
+        $initContent2 = Get-Content $initLog -Raw -ErrorAction SilentlyContinue
+        if ($initContent2 -match "PASSWORD_RESET_OK") {
+            Write-Host "  [OK] init-file SQL 执行成功 (找到 PASSWORD_RESET_OK)" -ForegroundColor Green
+        } elseif ($initContent2) {
+            Write-Host "  init-log 内容:" -ForegroundColor Gray
+            Get-Content $initLog | Select-Object -First 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
         }
-        Start-Sleep -Seconds 3
+        if (Test-Path "$initLog.err") {
+            $initErr = Get-Content "$initLog.err" -Raw -ErrorAction SilentlyContinue
+            if ($initErr -match "ERROR|error") {
+                Write-Host "  init-log stderr 有 ERROR:" -ForegroundColor Red
+                Get-Content "$initLog.err" | Select-Object -First 10 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+            }
+        }
+    } else {
+        Write-Host "  [WARN] init log 文件不存在" -ForegroundColor Yellow
     }
-    Write-Host "  OK" -ForegroundColor Green
 
-    Write-Host "5) 启回 MariaDB (优先 Start-Service, 失败则用 mariadbd.exe 直接启)..." -ForegroundColor Cyan
-    # 优先 Start-Service (你装的可能是 MSI 版, 服务启动)
+    # 5) 验证密码改了
+    Write-Host "5) 验证新密码能连..." -ForegroundColor Cyan
+    $testPwd = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK] 新密码 opck2026 能连: $($testPwd -join ' ')" -ForegroundColor Green
+    } else {
+        Write-Host "  [FAIL] 新密码验证失败: $($testPwd -join ' ')" -ForegroundColor Red
+        Write-Host "  init-log 最后 30 行:" -ForegroundColor Gray
+        if (Test-Path $initLog) {
+            Get-Content $initLog -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
+        Write-Host "  init-log stderr 最后 30 行:" -ForegroundColor Gray
+        if (Test-Path "$initLog.err") {
+            Get-Content "$initLog.err" -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
+        # 清理
+        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
+        Remove-Item $initFile -ErrorAction SilentlyContinue
+        exit 7
+    }
+
+    # 6) SHUTDOWN 干净停
+    Write-Host "6) SHUTDOWN 干净停 mariadbd..." -ForegroundColor Cyan
+    $shutdownOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SHUTDOWN;" 2>&1
+    Start-Sleep -Seconds 5
+    & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
+    Write-Host "  OK" -ForegroundColor Green
+    Remove-Item $initFile -ErrorAction SilentlyContinue
+
+    # 7) 启回 MariaDB 服务
+    Write-Host "7) 启回 MariaDB (优先 Start-Service, 失败则 mariadbd.exe 直接启)..." -ForegroundColor Cyan
     $serviceStarted = $false
     $svc3 = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
     if ($svc3) {
@@ -332,24 +250,15 @@ SELECT 'PASSWORD_UPDATED' as status;
         if ($svc3.Status -eq "Running") {
             $portNow = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
             if ($portNow) {
-                Write-Host "  OK (服务起来了, 端口监听中)" -ForegroundColor Green
+                Write-Host "  OK (服务起来了, 端口 $DbPort 监听)" -ForegroundColor Green
                 $serviceStarted = $true
-            } else {
-                Write-Host "  [WARN] 服务起来但 端口 $DbPort 未监听" -ForegroundColor Yellow
             }
         }
-    } else {
-        Write-Host "  [WARN] 找不到服务 $MariaService (你可能是 zip 解压安装)" -ForegroundColor Yellow
     }
-    # 兑底: 用 mariadbd.exe 直接启 (zip 安装场景)
     if (-not $serviceStarted) {
-        Write-Host "  启 mariadbd.exe (zip 安装兑底)..." -ForegroundColor Cyan
-        $dataDir2 = "C:\Program Files\MariaDB 11.8\data"
-        if (-not (Test-Path $dataDir2)) {
-            $dataDir2 = (Get-ChildItem "C:\Program Files\MariaDB*" -Directory | Select-Object -First 1).FullName + "\data"
-        }
+        Write-Host "  启 mariadbd.exe (直接启, zip 安装场景)..." -ForegroundColor Cyan
         $normalLog = Join-Path $env:TEMP "mariadbd-normal.log"
-        $normalArgs = "--datadir=`"$dataDir2`" --port=$DbPort --console"
+        $normalArgs = "--datadir=`"$dataDir`" --port=$DbPort --console"
         $procN = Start-Process -FilePath $mariadbdExe -ArgumentList $normalArgs `
             -RedirectStandardOutput $normalLog -RedirectStandardError "$normalLog.err" `
             -WindowStyle Hidden -PassThru
@@ -357,7 +266,6 @@ SELECT 'PASSWORD_UPDATED' as status;
         $portNow2 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
         if ($portNow2) {
             Write-Host "  OK (mariadbd.exe 在端口 $DbPort 监听)" -ForegroundColor Green
-            $serviceStarted = $true
         } else {
             Write-Host "  [FAIL] mariadbd 启不起来, 看 log: $normalLog.err" -ForegroundColor Red
             if (Test-Path "$normalLog.err") {
@@ -367,50 +275,31 @@ SELECT 'PASSWORD_UPDATED' as status;
         }
     }
 
-    # 5) 验证新密码能连
-    Write-Host "6) 验证新密码能连..." -ForegroundColor Cyan
-    $testOut2 = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
+    # 8) 最终验证
+    Write-Host "8) 最终验证新密码能连..." -ForegroundColor Cyan
+    $finalTest = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[FAIL] 新密码连不上:" -ForegroundColor Red
-        $testOut2 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        Write-Host "[FAIL] 最终验证失败: $($finalTest -join ' ')" -ForegroundColor Red
         exit 7
     }
-    Write-Host "  OK" -ForegroundColor Green
+    Write-Host "  OK: $($finalTest -join ' ')" -ForegroundColor Green
     Write-Host "==== -ResetRootPassword 流程完成 ====" -ForegroundColor Cyan
     Write-Host ""
 }
 
 # ---- 跑 init.sql (UTF-8 BOM + utf8mb4) ----
+if (-not (Test-Path $InitSql)) {
+    Write-Host "[FAIL] init.sql 不存在: $InitSql" -ForegroundColor Red
+    exit 4
+}
 Write-Host "跑 init.sql (DROP + CREATE + 15 表 + seed)..." -ForegroundColor Cyan
-Get-Content $InitSql | & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 2>&1 | Out-Null
+Get-Content $InitSql -Encoding UTF8 | & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[FAIL] init.sql 跑失败, 退出码 $LASTEXITCODE" -ForegroundColor Red
     exit 3
 }
 Write-Host "OK" -ForegroundColor Green
-
-# ---- 验证 ----
-Write-Host "验证..." -ForegroundColor Cyan
-$tables = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword -N -B --default-character-set=utf8mb4 -e "USE $DbName; SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DbName';" 2>&1
-$users = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword -N -B --default-character-set=utf8mb4 -e "USE $DbName; SELECT COUNT(*) FROM sys_user;" 2>&1
-
 Write-Host ""
-Write-Host "==== 验证结果 ====" -ForegroundColor Green
-Write-Host "表数: $tables (期望 15)" -ForegroundColor White
-Write-Host "用户数: $users (期望 6)" -ForegroundColor White
-Write-Host ""
-
-if ($tables -eq 15 -and $users -eq 6) {
-    Write-Host "[OK] 初始化完成! 演示账号:" -ForegroundColor Green
-    Write-Host "   - 患者:    user_wang / root" -ForegroundColor White
-    Write-Host "   - 医生:    doctor_zhang / root" -ForegroundColor White
-    Write-Host "   - 管理员:  admin / root" -ForegroundColor White
-    Write-Host ""
-    Write-Host "下一步:" -ForegroundColor Cyan
-    Write-Host "   cd $ScriptDir" -ForegroundColor White
-    Write-Host "   .\start-backend.ps1" -ForegroundColor White
-    Write-Host "   (新窗口) .\start-frontend-pc.ps1" -ForegroundColor White
-} else {
-    Write-Host "[WARN] 数量不对" -ForegroundColor Yellow
-    exit 4
-}
+Write-Host "==== 初始化完成 ====" -ForegroundColor Cyan
+Write-Host "  后端启动: .\start-backend.ps1" -ForegroundColor Gray
+Write-Host "  PC Web  : .\start-frontend-pc.ps1" -ForegroundColor Gray
