@@ -152,10 +152,12 @@ if ($ResetRootPassword) {
     }
     Write-Host "2) datadir: $dataDir" -ForegroundColor Gray
 
-    # 3) Start mariadbd with --skip-grant-tables (no auth, no init-file)
-    Write-Host "3) Start mariadbd --skip-grant-tables (wait 8s)..." -ForegroundColor Cyan
+    # 3) Start mariadbd in NORMAL mode (no --skip-grant-tables)
+    #    --skip-grant-tables blocks SET PASSWORD and UPDATE (ERROR 1290)
+    #    Normal mode: use whatever root password is currently set (default = empty)
+    Write-Host "3) Start mariadbd in normal mode (wait 8s)..." -ForegroundColor Cyan
     $skipLog = Join-Path $env:TEMP "mariadbd-skip.log"
-    $skipArgString = "--skip-grant-tables --skip-networking=0 --datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
+    $skipArgString = "--datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
     Write-Host "  args: $skipArgString" -ForegroundColor Gray
     $procS = Start-Process -FilePath $mariadbdExe `
         -ArgumentList $skipArgString `
@@ -175,40 +177,60 @@ if ($ResetRootPassword) {
         & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
         exit 9
     }
-    Write-Host "  OK (mariadbd ready, no auth required)" -ForegroundColor Green
+    Write-Host "  OK (mariadbd ready)" -ForegroundColor Green
 
-    # 4) Connect without password, run UPDATE mysql.global_priv
-    #    MariaDB 11.x stores root creds in mysql.global_priv (not mysql.user)
-    Write-Host "4) Reset password via UPDATE mysql.global_priv..." -ForegroundColor Cyan
+    # 4) Try multiple password options to find current root password
+    #    Default MariaDB 11.8 zip install: root@localhost = empty password
+    #    root@127.0.0.1 may not exist or have empty password
+    Write-Host "4) Try empty password (default MariaDB install)..." -ForegroundColor Cyan
+    $candidatePasswords = @("", "root", "opck2026")
+    $foundPwd = $null
+    foreach ($tryPwd in $candidatePasswords) {
+        Write-Host "  Try password: '$(if ($tryPwd) { '*****' } else { '(empty)' })'" -ForegroundColor Gray
+        $tryOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$tryPwd --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $foundPwd = $tryPwd
+            Write-Host "  OK (current password is: $(if ($tryPwd) { '*****' } else { '(empty)' }))" -ForegroundColor Green
+            break
+        }
+    }
+    if (-not $foundPwd) {
+        Write-Host "  [FAIL] No known password works, manual reset required" -ForegroundColor Red
+        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
+        exit 12
+    }
+
+    # 5) Reset password via SET PASSWORD (normal mode, should work)
+    Write-Host "5) Reset password via SET PASSWORD..." -ForegroundColor Cyan
     $resetSql = @"
+ALTER USER 'root'@'localhost' IDENTIFIED BY '$DbPassword';
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
+ALTER USER 'root'@'::1' IDENTIFIED BY '$DbPassword';
+FLUSH PRIVILEGES;
+"@
+    Write-Host "  SQL: $resetSql" -ForegroundColor Gray
+    $resetOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$foundPwd --default-character-set=utf8mb4 -e $resetSql 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [FAIL] ALTER USER failed:" -ForegroundColor Red
+        $resetOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        # Fallback: SET PASSWORD
+        Write-Host "  Fallback: SET PASSWORD..." -ForegroundColor Yellow
+        $fbSql = @"
 SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$DbPassword');
 SET PASSWORD FOR 'root'@'127.0.0.1' = PASSWORD('$DbPassword');
 SET PASSWORD FOR 'root'@'::1' = PASSWORD('$DbPassword');
 FLUSH PRIVILEGES;
 "@
-    Write-Host "  SQL: $resetSql" -ForegroundColor Gray
-    $resetOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $resetSql 2>&1
-    $resetExit = $LASTEXITCODE
-    if ($resetExit -ne 0) {
-        Write-Host "  [FAIL] SET PASSWORD failed:" -ForegroundColor Red
-        $resetOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-        # Fallback: try UPDATE mysql.user
-        Write-Host "  Fallback: try UPDATE mysql.user..." -ForegroundColor Yellow
-        $fallbackSql = @"
-UPDATE mysql.user SET Password = PASSWORD('$DbPassword') WHERE User = 'root';
-FLUSH PRIVILEGES;
-"@
-        $fallbackOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $fallbackSql 2>&1
-        $fbExit = $LASTEXITCODE
-        if ($fbExit -ne 0) {
-            Write-Host "  [FAIL] UPDATE mysql.user also failed:" -ForegroundColor Red
-            $fallbackOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        $fbOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$foundPwd --default-character-set=utf8mb4 -e $fbSql 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [FAIL] SET PASSWORD also failed:" -ForegroundColor Red
+            $fbOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
             & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
-            exit 12
+            exit 13
         }
-        Write-Host "  OK (UPDATE mysql.user worked)" -ForegroundColor Green
-    } else {
         Write-Host "  OK (SET PASSWORD worked)" -ForegroundColor Green
+    } else {
+        Write-Host "  OK (ALTER USER worked)" -ForegroundColor Green
     }
 
     # 5) SHUTDOWN clean stop (forces privileges to disk)
