@@ -183,12 +183,41 @@ if ($ResetRootPassword) {
     Write-Host "  OK (NEW mysql system db created, default root has empty password)" -ForegroundColor Green
 
     # 5) Copy user databases (health_management, etc.) from OLD to NEW datadir
+    #    CRITICAL: only copy user db directories, NOT any system files
+    #    (InnoDB undo/log files, sys schemas, mysql system db all corrupt if copied)
     Write-Host "5) Copy user databases (health_management, ...) from OLD to NEW datadir..." -ForegroundColor Cyan
     $oldItems = Get-ChildItem -Path $oldDataDir -ErrorAction SilentlyContinue
-    $skipped = @("mysql", "ibdata1", "ib_logfile0", "ib_logfile1", "aria_log.00000001", "aria_log_control", "ibtmp1")
+    # System files/dirs that MUST NOT be copied (let mariadbd recreate)
+    $systemPatterns = @(
+        "mysql",                    # System database
+        "performance_schema",       # System schema
+        "sys",                      # System schema
+        "test",                     # Default test db
+        "ibdata1",                  # InnoDB system tablespace
+        "ib_logfile*",              # InnoDB redo logs
+        "ibtmp1",                   # InnoDB temp tablespace
+        "ib_buffer_pool",           # InnoDB buffer pool cache
+        "undo001", "undo002", "undo003",  # InnoDB undo tablespaces
+        "aria_log.*", "aria_log_control", # Aria engine logs
+        "tc.log", "multi-master.info",    # Misc
+        "my.ini", "my.cnf",         # Config (let mariadbd recreate or use --defaults-file)
+        "*.err", "*.pid",           # Old logs
+        "ddl_recovery*.log",
+        "private_key.pem", "public_key.pem",  # SSL certs
+        "binlog.*",                 # Binary logs
+        "relay-log.*",              # Relay logs
+        "master.info", "relay-log.info"
+    )
     $copied = 0
     foreach ($item in $oldItems) {
-        if ($skipped -contains $item.Name) {
+        $isSystem = $false
+        foreach ($pat in $systemPatterns) {
+            if ($item.Name -like $pat) {
+                $isSystem = $true
+                break
+            }
+        }
+        if ($isSystem) {
             Write-Host "  Skip system file: $($item.Name)" -ForegroundColor Gray
             continue
         }
@@ -198,7 +227,7 @@ if ($ResetRootPassword) {
         Copy-Item -Path $src -Destination $dst -Recurse -Force -ErrorAction SilentlyContinue
         $copied++
     }
-    Write-Host "  OK ($copied items copied)" -ForegroundColor Green
+    Write-Host "  OK ($copied user db items copied)" -ForegroundColor Green
 
     # 6) Start mariadbd pointing at NEW datadir
     Write-Host "6) Start mariadbd --datadir=NEW_DIR (wait 8s)..." -ForegroundColor Cyan
