@@ -186,16 +186,12 @@ FLUSH PRIVILEGES;
     # 4) Start mariadbd with --init-file (array form, forward slash path)
     Write-Host "4) Start mariadbd --init-file (wait 20s)..." -ForegroundColor Cyan
     $initLog = Join-Path $env:TEMP "mariadbd-init.log"
-    # Array form: each arg as separate element (avoids quote escape issues)
+    # String form with backtick-double-quote escaping for paths with spaces
+    # PS 5.1 array form 会按空格截断含空格路径 ('C:\Program Files\...' -> 'C:\Program')
+    $argString = "--init-file=`"$initFile`" --datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
+    Write-Host "  args: $argString" -ForegroundColor Gray
     $proc = Start-Process -FilePath $mariadbdExe `
-        -ArgumentList @(
-            "--init-file=$initFile",
-            "--datadir=$dataDir",
-            "--port=$DbPort",
-            "--character-set-server=utf8mb4",
-            "--character-set-filesystem=utf8mb4",
-            "--console"
-        ) `
+        -ArgumentList $argString `
         -RedirectStandardOutput $initLog `
         -RedirectStandardError "$initLog.err" `
         -WindowStyle Hidden -PassThru
@@ -278,13 +274,9 @@ FLUSH PRIVILEGES;
     if (-not $serviceStarted) {
         Write-Host "  Start mariadbd.exe directly (zip install scenario)..." -ForegroundColor Cyan
         $normalLog = Join-Path $env:TEMP "mariadbd-normal.log"
+        $normalArgString = "--datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --console"
         $procN = Start-Process -FilePath $mariadbdExe `
-            -ArgumentList @(
-                "--datadir=$dataDir",
-                "--port=$DbPort",
-                "--character-set-server=utf8mb4",
-                "--console"
-            ) `
+            -ArgumentList $normalArgString `
             -RedirectStandardOutput $normalLog `
             -RedirectStandardError "$normalLog.err" `
             -WindowStyle Hidden -PassThru
