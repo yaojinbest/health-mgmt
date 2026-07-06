@@ -38,6 +38,12 @@
     - ✅ 这里-string 全部禁用 (改用 .sql 文件 + Copy-Item)
     - ✅ mariadbd 启动参数必加 --character-set-server=utf8mb4
     - ✅ 所有 ps1 UTF-8 BOM
+  v4.1.1 (2026-07-06 23:00) - ProjectRoot 自动探测 + jar 上层 fallback
+  v4.1.2 (2026-07-06 23:09) - Test-NetTCPConnection PS 5.1 兼容
+  v4.1.3 (2026-07-07 05:55) - 兼容 v4.1-full.zip 拓扑 (jar/dist 在 ResolvedRoot 顶层)
+    - 进哥 5:46 AM 报"找不到 jar + 找不到 dist", 原 fallback 假设 jar 在上级目录,
+      但实际 zip 把 jar 放顶层、dist 用 frontend-pc-dist/ 重命名了
+    - 新增 2 个 fallback: $ResolvedRoot\health-management-1.0.0.jar + frontend-pc-dist/ + dist/
 #>
 
 [CmdletBinding()]
@@ -128,8 +134,35 @@ if (-not (Test-Path $InitSql)) {
     }
 }
 
+# v4.1.3 fallback (新): jar/dist 在 ResolvedRoot 顶层 (health-mgmt-deploy-v4.1-full.zip 拓扑)
+# 进哥 7/7 5:46 AM 部署报"找不到 jar + 找不到 dist" — 因为 v4.1-full.zip 把 jar 放在顶层
+# (而不是 target/) 把 dist 改名为 frontend-pc-dist (而不是 frontend-pc/dist/)
+# 解决: 自动探测这两种 zip 变体布局
+if (-not (Test-Path $JarPath)) {
+    $JarPathTop = Join-Path $ResolvedRoot "health-management-1.0.0.jar"
+    if (Test-Path $JarPathTop) {
+        Write-Host "  [INFO] 从 ResolvedRoot 顶层找 jar: $JarPathTop" -ForegroundColor Yellow
+        $JarPath = $JarPathTop
+    }
+}
+if (-not (Test-Path $DistPath)) {
+    # 变体 1: frontend-pc-dist/ (v4.1-full.zip 用这个)
+    $DistAlt = Join-Path $ResolvedRoot "frontend-pc-dist"
+    if (Test-Path $DistAlt) {
+        Write-Host "  [INFO] dist 在 frontend-pc-dist/: $DistAlt" -ForegroundColor Yellow
+        $DistPath = $DistAlt
+    } else {
+        # 变体 2: 顶层 dist/ (备用)
+        $DistAlt2 = Join-Path $ResolvedRoot "dist"
+        if (Test-Path $DistAlt2) {
+            Write-Host "  [INFO] dist 在顶层 dist/: $DistAlt2" -ForegroundColor Yellow
+            $DistPath = $DistAlt2
+        }
+    }
+}
+
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  健康管理系统 一键部署 v4.1.1" -ForegroundColor Cyan
+Write-Host "  健康管理系统 一键部署 v4.1.3" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Project root: $ResolvedRoot" -ForegroundColor Gray
