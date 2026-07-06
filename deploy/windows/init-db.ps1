@@ -221,7 +221,7 @@ if ($ResetRootPassword) {
         $dataDir = (Get-ChildItem "C:\Program Files\MariaDB*" -Directory | Select-Object -First 1).FullName + "\data"
     }
     $grantLog = Join-Path $env:TEMP "mariadbd-grant.log"
-    $grantArgs = "--skip-grant-tables --skip-networking --datadir=`"$dataDir`" --port=$DbPort --console"
+    $grantArgs = "--skip-grant-tables --datadir=`"$dataDir`" --port=$DbPort --console"
     Write-Host "  datadir: $dataDir" -ForegroundColor Gray
     Write-Host "  log:     $grantLog" -ForegroundColor Gray
     $proc = Start-Process -FilePath $mariadbdExe -ArgumentList $grantArgs `
