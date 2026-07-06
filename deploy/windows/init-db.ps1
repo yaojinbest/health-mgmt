@@ -62,7 +62,7 @@ if (-not (Test-Path $InitSql)) {
 # ---- 找 mysql.exe (PATH → 常见安装位置) ----
 $mysqlExe = ""
 if ($MysqlPath -and (Test-Path $MysqlPath)) {
-    $mysqlExe = (Get-MysqlItem) $MysqlPath
+    $mysqlExe = (Get-Item $MysqlPath).FullName
 } else {
     try {
         $whereOut = & where.exe mysql 2>$null | Select-Object -First 1
