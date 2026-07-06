@@ -267,7 +267,8 @@ FLUSH LOGS;
     }
     # 改密码
     $resetOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $resetSql 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $alterOk = ($LASTEXITCODE -eq 0)
+    if (-not $alterOk) {
         Write-Host "[FAIL] ALTER USER 失败:" -ForegroundColor Red
         $resetOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
         Write-Host "  残留进程: 需手动 Stop-Process mariadbd" -ForegroundColor Yellow
@@ -281,7 +282,17 @@ FLUSH LOGS;
         Write-Host "  验证查询响应: $($verifyOut -join ' ' | Out-String).Trim()" -ForegroundColor Gray
     }
     Write-Host "  OK" -ForegroundColor Green
-    if ($LASTEXITCODE -ne 0) {
+
+    # 补上 (v3.1.8 fix): 上面 verifyOut 有 1045 会让 $LASTEXITCODE 变成非 0
+    # 导致后面 'if ($LASTEXITCODE -ne 0)' 误判 ALTER USER 失败
+    # 重新跑一遍干净 SELECT 看实际状态
+    $retryOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT 1" 2>&1
+    if ($LASTEXITCODE -eq 0 -and $retryOut -match "1") {
+        Write-Host "  [OK] ALTER USER 实际生效: 新密码 opck2026 能连" -ForegroundColor Green
+    } else {
+        Write-Host "  [DEBUG] 新密码验证: $retryOut" -ForegroundColor Gray
+    }
+    if (-not $alterOk) {
         Write-Host "[FAIL] ALTER USER 失败:" -ForegroundColor Red
         $resetOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
         Write-Host "  残留进程: 需手动 Stop-Process mariadbd" -ForegroundColor Yellow
