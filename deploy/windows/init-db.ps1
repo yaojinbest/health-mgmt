@@ -252,13 +252,33 @@ if ($ResetRootPassword) {
     $resetSql = @"
 FLUSH PRIVILEGES;
 ALTER USER '$DbUser'@'localhost' IDENTIFIED BY '$DbPassword';
-CREATE USER IF NOT EXISTS '$DbUser'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
-CREATE USER IF NOT EXISTS '$DbUser'@'::1' IDENTIFIED BY '$DbPassword';
-GRANT ALL ON *.* TO '$DbUser'@'127.0.0.1' WITH GRANT OPTION;
-GRANT ALL ON *.* TO '$DbUser'@'::1' WITH GRANT OPTION;
+ALTER USER '$DbUser'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
+ALTER USER '$DbUser'@'::1' IDENTIFIED BY '$DbPassword';
 FLUSH PRIVILEGES;
+FLUSH HOSTS;
+FLUSH LOGS;
 "@
+    # 验证一下连接能进, 不要求真进库 (skip-grant 模式, 任何密码都能进)
+    $testReset = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SELECT 1" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[FAIL] 连不上 skip-grant mariadbd:" -ForegroundColor Red
+        $testReset | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        exit 6
+    }
+    # 改密码
     $resetOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $resetSql 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[FAIL] ALTER USER 失败:" -ForegroundColor Red
+        $resetOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        Write-Host "  残留进程: 需手动 Stop-Process mariadbd" -ForegroundColor Yellow
+        exit 6
+    }
+    # 验证密码表有数据
+    $verifySql = "SELECT user, host, plugin FROM mysql.user WHERE user='$DbUser'"
+    $verifyOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $verifySql 2>&1
+    Write-Host "  mysql.user 表 root 行:" -ForegroundColor Gray
+    $verifyOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    Write-Host "  OK" -ForegroundColor Green
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[FAIL] ALTER USER 失败:" -ForegroundColor Red
         $resetOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
@@ -269,9 +289,20 @@ FLUSH PRIVILEGES;
 
     # 4) 停 mariadbd, 启回服务
     Write-Host "4) 停 mariadbd (skip-grant-tables)..." -ForegroundColor Cyan
-    $proc2 = Get-Process -Name mariadbd -ErrorAction SilentlyContinue
-    if ($proc2) {
-        Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
+    # 先用 mysql 干净关 (保证 user 表刷盘)
+    $shutdownOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SHUTDOWN" 2>&1
+    Start-Sleep -Seconds 5
+    # 兑底强杀
+    foreach ($name in @("mariadbd.exe", "mysqld.exe")) {
+        & taskkill.exe /F /IM $name /T 2>$null | Out-Null
+    }
+    Start-Sleep -Seconds 3
+    $portBusy4 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
+    if ($portBusy4) {
+        Write-Host "  [WARN] 端口仍被占, 按 PID 杀" -ForegroundColor Yellow
+        $portBusy4.OwningProcess | Sort-Object -Unique | ForEach-Object {
+            & taskkill.exe /F /PID $_ /T 2>$null | Out-Null
+        }
         Start-Sleep -Seconds 3
     }
     Write-Host "  OK" -ForegroundColor Green
