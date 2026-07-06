@@ -4,6 +4,34 @@
 
 ---
 
+## 📱 同步：Android 客户端
+
+部署完 PC Web 后, 手机/模拟器可装 Android 客户端验证完整功能。
+
+### 下载 APK
+- 网盘: `/apps/bdpan/health-mgmt-app/health-mgmt-app-v1.0.7-quick-record.apk` (8.1 MB)
+- md5: `f0c38f621f9db191ccd58be0a600a5f0`
+- 最低 Android: 7.0 (API 24)
+
+### 装好后配置
+1. 启动 App → 进 Mine tab
+2. 点 “服务器配置” → 填 `http://<你 PC IP>:8090`
+3. 进任意 tab → 弹登录 → 用 `user_wang / root` 登录
+
+### Android 端核心功能
+- 🏠 Home: 11 宫格入口 (录入/用药/档案/图表/求救/文章/咨询/我的/统计/预约/我的预约)
+- 📊 Health: 健康数据录入 + 4 维度图表 (血压/血糖/心率/体重)
+- 🛠 Tools: SOS + 联系人 + 咨询 + 文章 + 用药
+- 💬 Consult: 咨询会话 + 新建 + 聊天
+- 👤 Mine: 用户卡片 + 服务器配置 + 退出
+
+### Android 仓库
+- GitHub: https://github.com/yaojinbest/health-mgmt-app
+- Gitee: https://gitee.com/yaojinbest/health-mgmt-app
+- 独立仓库, 不在本仓库
+
+---
+
 ## 重要:本版本踩坑沉淀 (2026-07-06)
 
 **8 个真机坑全部已修, 部署本项目不会再踩**。本 README 包含完整原因 + 解决方案 + 复现路径。
@@ -276,6 +304,10 @@ Stop-Process -Id <PID> -Force
 
 ## 修订记录
 
+- **v3.0.1** (2026-07-06): 增加 Android 客户端部署导航
+  - 顶层 README.md (3 件套导航: 后端/PC Web/Android)
+  - deploy/windows/README.md 加 Android 端 APK 下载 + 配置 + 仓库链接
+  - 详细版本号 + md5 + 下载路径
 - **v3.0** (2026-07-06): 8 个真机坑永久修复
   - 端口默认 3306 (跟 application.yml 对齐)
   - 密码明确 opck2026
