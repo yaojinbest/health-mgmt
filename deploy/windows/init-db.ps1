@@ -163,32 +163,25 @@ ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
 ALTER USER 'root'@'::1' IDENTIFIED BY '$DbPassword';
 FLUSH PRIVILEGES;
 "@
-    # Python write: strict UTF-8 NO BOM
-    $pythonWrite = @"
-import sys
-content = '''$initContent'''
-with open(r'$initFile', 'wb') as f:
-    f.write(content.encode('utf-8'))
-# Verify
-with open(r'$initFile', 'rb') as f:
-    head = f.read(3)
-    if head[:3] == b'\xef\xbb\xbf':
-        print('ERROR: BOM detected in init-file!', file=sys.stderr)
-        sys.exit(1)
-    else:
-        print(f'init-file written: {len(content)} bytes, no BOM, head=0x{head.hex()}')
-"@
-    $pythonScript = Join-Path $env:TEMP "write_init_file.py"
-    [System.IO.File]::WriteAllText($pythonScript, $pythonWrite, [System.Text.Encoding]::ASCII)
-    Write-Host "3) Write init-file via Python (UTF-8 NO BOM, ASCII only)..." -ForegroundColor Cyan
-    $pyOut = & python.exe $pythonScript 2>&1
-    $pyOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAIL] Python write init-file failed" -ForegroundColor Red
+    # PowerShell write: strict UTF-8 NO BOM using .NET
+    # (python.exe 可能不在 PATH, 用 PS 自带更可靠)
+    Write-Host "3) Write init-file via PowerShell (UTF-8 NO BOM, ASCII only)..." -ForegroundColor Cyan
+    try {
+        $utf8NoBOM = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($initFile, $initContent, $utf8NoBOM)
+        # Verify head 3 bytes != BOM
+        $headBytes = [System.IO.File]::ReadAllBytes($initFile)[0..2]
+        $headHex = ($headBytes | ForEach-Object { $_.ToString('X2') }) -join ''
+        if ($headHex -eq "EFBBBF") {
+            Write-Host "  [FAIL] BOM detected in init-file! head=0x$headHex" -ForegroundColor Red
+            exit 11
+        }
+        Write-Host "  init-file written: $($initContent.Length) bytes, head=0x$headHex (no BOM)" -ForegroundColor Gray
+        Write-Host "  init-file: $initFile" -ForegroundColor Gray
+    } catch {
+        Write-Host "  [FAIL] PowerShell write init-file failed: $_" -ForegroundColor Red
         exit 11
     }
-    Write-Host "  init-file: $initFile" -ForegroundColor Gray
-    Remove-Item $pythonScript -ErrorAction SilentlyContinue
 
     # 4) Start mariadbd with --init-file (array form, forward slash path)
     Write-Host "4) Start mariadbd --init-file (wait 20s)..." -ForegroundColor Cyan
