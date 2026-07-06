@@ -1,5 +1,6 @@
 package com.example.health.common;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.BindException;
@@ -7,6 +8,15 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+/**
+ * 全局异常处理.
+ *
+ * 修复 (2026-07-06): 改用 log.error() 而不是 exception.printStackTrace()
+ *   - printStackTrace() 走 System.err, logback 没接管 System.err, stack trace 丢失
+ *   - log.error("msg", exception) 通过 SLF4J, logback 会写到日志文件
+ *   - 这样真正的 SQLException/Caused by 链能在 backend.log 看到
+ */
+@Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
     @ExceptionHandler(UnauthorizedException.class)
@@ -29,7 +39,8 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public Result<Void> handle(Exception exception) {
-        exception.printStackTrace();
+        // 改用 SLF4J + logback, stack trace 写进 backend.log
+        log.error("系统异常: {}", exception.getMessage(), exception);
         return Result.fail("系统异常：" + exception.getMessage());
     }
 }
