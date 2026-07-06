@@ -273,11 +273,13 @@ FLUSH LOGS;
         Write-Host "  残留进程: 需手动 Stop-Process mariadbd" -ForegroundColor Yellow
         exit 6
     }
-    # 验证密码表有数据
-    $verifySql = "SELECT user, host, plugin FROM mysql.user WHERE user='$DbUser'"
-    $verifyOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $verifySql 2>&1
-    Write-Host "  mysql.user 表 root 行:" -ForegroundColor Gray
-    $verifyOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    # 验证密码表有数据 (skip-grant 模式下 SELECT 也会被拒, 这里仅试探连接, 输出忽略)
+    $verifyOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "FLUSH PRIVILEGES; SELECT 1 as ok" 2>&1
+    if ($verifyOut -match "1045" -or $verifyOut -match "Access denied") {
+        Write-Host "  [WARN] ALTER USER 后验证查询被拒, 仍认 skip-grant 未生效, 需手动检查" -ForegroundColor Yellow
+    } else {
+        Write-Host "  验证查询响应: $($verifyOut -join ' ' | Out-String).Trim()" -ForegroundColor Gray
+    }
     Write-Host "  OK" -ForegroundColor Green
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[FAIL] ALTER USER 失败:" -ForegroundColor Red
