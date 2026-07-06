@@ -5,8 +5,8 @@
 param(
     [string]$JavaHome = "",
     [string]$NodeExe = "",
-    [string]$FrontendDir = "D:\health-mgmt\frontend-pc",
-    [string]$ProjectRoot = "D:\health-mgmt",
+    [string]$FrontendDir = "",
+    [string]$ProjectRoot = "..\..",
     [string]$NssmPath = "C:\Tools\nssm-2.24\win64\nssm.exe"
 )
 
@@ -30,6 +30,13 @@ Write-Host "NSSM: $NssmPath" -ForegroundColor Cyan
 
 $BackendService = "HealthMgmtBackend"
 $FrontendService = "HealthMgmtFrontendPc"
+
+# 路径解析 (跟 sibling 脚本一致, 默认 ..\.. 相对路径)
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$AbsRoot = Resolve-Path (Join-Path $ScriptDir $ProjectRoot) | Select-Object -ExpandProperty Path
+$ProjectRoot = $AbsRoot
+if (-not $FrontendDir) { $FrontendDir = Join-Path $ProjectRoot "frontend-pc" }
+
 $JarPath = Join-Path $ProjectRoot "target\health-management-1.0.0.jar"
 $LogDir = Join-Path $ProjectRoot "deploy\windows\logs"
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }

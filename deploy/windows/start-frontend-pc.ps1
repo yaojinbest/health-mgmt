@@ -17,7 +17,8 @@
 [CmdletBinding()]
 param(
     [string]$NodeExe = "",
-    [string]$FrontendDir = "D:\health-mgmt\frontend-pc",
+    [string]$ProjectRoot = "..\..",
+    [string]$FrontendDir = "",
     [int]$Port = 5174
 )
 
@@ -58,8 +59,14 @@ if (-not $NodeExe) {
 Write-Host "node: $NodeExe" -ForegroundColor Cyan
 
 # ---- 找 frontend-pc ----
+if (-not $FrontendDir) {
+    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $AbsRoot = Resolve-Path (Join-Path $ScriptDir $ProjectRoot) | Select-Object -ExpandProperty Path
+    $FrontendDir = Join-Path $AbsRoot "frontend-pc"
+}
 if (-not (Test-Path $FrontendDir)) {
     Write-Host "[FAIL] FrontendDir 不存在: $FrontendDir" -ForegroundColor Red
+    Write-Host "  需手动指定: -FrontendDir 'D:\health-mgmt\frontend-pc'" -ForegroundColor Yellow
     exit 3
 }
 Write-Host "frontend-pc: $FrontendDir" -ForegroundColor Cyan
