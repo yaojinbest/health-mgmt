@@ -4,6 +4,27 @@
 
 ---
 
+## ⚠️ 不要在 PowerShell 直接跑 SQL (踩坑警示)
+
+**症状**: 在 PowerShell 5.1 直接粘多行 SQL 会报 `here-string 标题后面和行尾之前不允许包含任何字符`。
+**根因**: `GRANT` / `SELECT` 等 SQL 关键字被 PowerShell 当 here-string 标记。
+
+**对策** (任选一种):
+
+```powershell
+# 方法 A: 进 mysql 客户端跑
+& "C:\Program Files\MariaDB 11.8\bin\mysql.exe" -uroot -p
+# 然后逐行粘 SQL
+
+# 方法 B: 写 .sql 文件 + 管道 (文件需 UTF-8 BOM)
+Get-Content D:\fix.sql | & "C:\Program Files\MariaDB 11.8\bin\mysql.exe" -h 127.0.0.1 -uroot -p --default-character-set=utf8mb4
+
+# 方法 C (推荐): 跑 init-db.ps1 (脚本已封装所有用户创建)
+.\init-db.ps1 -DbPassword opck2026
+```
+
+---
+
 ## 📱 同步：Android 客户端
 
 部署完 PC Web 后, 手机/模拟器可装 Android 客户端验证完整功能。
@@ -299,11 +320,17 @@ Stop-Process -Id <PID> -Force
 | 7. 不用 `$env:MYSQL_PWD` | PowerShell 5.1 这个变量不可靠, 改用参数 `Read-Host -AsSecureString` |
 | 8. 默认端口跟 application.yml 一致 | 别 3305/3306 混用, 文档说啥就用啥 |
 | 9. 错误日志必须用 `log.error("msg", exception)` | `printStackTrace()` 走 stderr, logback 没接管 |
+| 10. 所有 ps1 默认用 `..\..` 相对路径 | 不要硬编码 `D:\` 或 `C:\`, 任何盘符都该跑得通 |
+| 11. **不要在 PowerShell 直接粘多行 SQL** | `GRANT` / `SELECT` 等关键字被当 here-string 标记, 报 `不允许包含任何字符`<br>对策: 进 `mysql -u root -p` 客户端跑, 或 `Get-Content file.sql \| mysql ...` |
 
 ---
 
 ## 修订记录
 
+- **v3.0.2** (2026-07-06): 修复 PowerShell 直接跑 SQL 报 here-string 错的踩坑
+  - README 顶部加 "不要在 PowerShell 直接跑 SQL" 警示 + 3 种对策
+  - OPC_K PowerShell SOP 升级 11 条 (新增 #10 + #11)
+  - 真机踩坑沉淀 (进哥 7/6 15:15)
 - **v3.0.1** (2026-07-06): 增加 Android 客户端部署导航
   - 顶层 README.md (3 件套导航: 后端/PC Web/Android)
   - deploy/windows/README.md 加 Android 端 APK 下载 + 配置 + 仓库链接
