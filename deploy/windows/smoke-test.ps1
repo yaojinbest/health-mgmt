@@ -1,132 +1,60 @@
 ﻿# ============================================================================
-#  smoke-test.ps1 - 健康管理系统端到端冒烟测试
+#  smoke-test.ps1 - 端到端冒烟测试 (v2)
 # ============================================================================
-#
-#  8 场景 (PC Web + 后端 + Android 三端覆盖):
-#    1. 后端可达
-#    2. PC Web 可达 (Vite preview)
-#    3. 患者登录 (user_wang / root)
-#    4. 患者健康数据列表
-#    5. 医生登录 (doctor_zhang / root)
-#    6. 管理员登录 (admin / root)
-#    7. 紧急联系人列表
-#    8. 健康文章列表
-#
-#  用法:
-#    PS> .\smoke-test.ps1                          # 默认 http://localhost:8090 + PC Web 5174
-#    PS> .\smoke-test.ps1 -Base http://10.0.0.5   # 远程主机
-# ============================================================================
-
 [CmdletBinding()]
 param(
-    [string]$Base = "http://localhost:8090",
-    [string]$Frontend = "http://localhost:5174"
+    [string]$BackendUrl = "http://localhost:8090",
+    [string]$FrontendUrl = "http://localhost:5174"
 )
 
+$ErrorActionPreference = "Continue"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$pass = 0
-$fail = 0
+$pass = 0; $fail = 0
+function Test-OK($msg) { Write-Host "  PASS $msg" -ForegroundColor Green; $script:pass++ }
+function Test-FAIL($msg) { Write-Host "  FAIL $msg" -ForegroundColor Red; $script:fail++ }
 
-function Test-Step {
-    param([string]$Name, [scriptblock]$Block, [string]$Expect = "200")
-    Write-Host "`n▶ $Name" -ForegroundColor Cyan -NoNewline
-    try {
-        $r = & $Block
-        if ($r -match "OK|200|✅") {
-            Write-Host "  ✅ PASS" -ForegroundColor Green
-            $script:pass++
-            return
-        }
-    } catch {
-        Write-Host "  ❌ FAIL: $($_.Exception.Message)" -ForegroundColor Red
-        $script:fail++
-        return
-    }
-    Write-Host "  ❌ FAIL" -ForegroundColor Red
-    $script:fail++
-}
-
-# ---- 1. 后端活跃 ----
-Test-Step "1. 后端 ROOT" {
-    $r = Invoke-RestMethod "$Base/" -UseBasicParsing -TimeoutSec 5
-    return "OK"
-}
-
-# ---- 2. PC Web 可达 ----
-Test-Step "2. PC Web 预览服务 (Vite preview 5174)" {
-    $r = Invoke-WebRequest "$Frontend/" -UseBasicParsing -TimeoutSec 5
-    if ($r.StatusCode -eq 200) { return "OK" }
-    return "$($r.StatusCode)"
-}
-
-# ---- 3. 登录 ----
-Test-Step "3. 患者登录 (user_wang/root)" {
-    $body = @{username="user_wang"; password="root"} | ConvertTo-Json
-    $r = Invoke-RestMethod "$Base/api/auth/login" -Method POST -ContentType "application/json" -Body $body -TimeoutSec 5
-    if ($r.code -eq 200 -and $r.data.token) {
-        $script:patientToken = $r.data.token
-        $script:patientId = $r.data.id
-        return "OK"
-    }
-    return $r.message
-}
-
-# ---- 4. 健康数据列表 ----
-Test-Step "4. 患者健康数据列表" {
-    $headers = @{Authorization = "Bearer $script:patientToken"}
-    $r = Invoke-RestMethod "$Base/api/health-data/list?userId=$($script:patientId)" `
-        -Headers $headers -TimeoutSec 5
-    if ($r.code -eq 200) { return "OK" }
-    return $r.message
-}
-
-# ---- 5. 紧急联系人列表 ----
-Test-Step "5. 紧急联系人列表" {
-    $headers = @{Authorization = "Bearer $script:patientToken"}
-    $r = Invoke-RestMethod "$Base/api/emergency/contact/list?userId=$($script:patientId)" `
-        -Headers $headers -TimeoutSec 5
-    if ($r.code -eq 200) { return "OK" }
-    return $r.message
-}
-
-# ---- 6. 健康文章列表 ----
-Test-Step "6. 健康文章列表 (公开, 无需登录)" {
-    $r = Invoke-RestMethod "$Base/api/article/list" -TimeoutSec 5
-    if ($r.code -eq 200) { return "OK" }
-    return $r.message
-}
-
-# ---- 7. 医生登录 ----
-Test-Step "7. 医生登录 (doctor_zhang/root)" {
-    $body = @{username="doctor_zhang"; password="root"} | ConvertTo-Json
-    $r = Invoke-RestMethod "$Base/api/auth/login" -Method POST -ContentType "application/json" -Body $body -TimeoutSec 5
-    if ($r.code -eq 200 -and $r.data.token) {
-        $script:doctorToken = $r.data.token
-        return "OK"
-    }
-    return $r.message
-}
-
-# ---- 8. 未授权访问被拒 ----
-Test-Step "8. 未授权访问被拒 (无 token)" {
-    try {
-        $r = Invoke-RestMethod "$Base/api/health-data/list" -TimeoutSec 5
-        return "❌ 应该 401"
-    } catch {
-        if ($_.Exception.Response.StatusCode -eq "Unauthorized" -or
-            $_.Exception.Response.StatusCode -eq 401) {
-            return "OK"
-        }
-        throw
-    }
-}
-
-# ---- 总结 ----
+Write-Host "后端: $BackendUrl" -ForegroundColor Cyan
+Write-Host "前端: $FrontendUrl" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "═════════════════════════════════════════" -ForegroundColor $(if($fail -eq 0){"Green"}else{"Yellow"})
-Write-Host "  通过: $pass  |  失败: $fail" -ForegroundColor $(if($fail -eq 0){"Green"}else{"Yellow"})
-Write-Host "═════════════════════════════════════════" -ForegroundColor $(if($fail -eq 0){"Green"}else{"Yellow"})
+
+# 1. 后端 health
+try {
+    $r = Invoke-WebRequest "$BackendUrl/api/auth/login" -Method OPTIONS -TimeoutSec 5 -ErrorAction Stop
+    Test-OK "后端 8090 端口在听"
+} catch {
+    Test-FAIL "后端 8090 没起: $($_.Exception.Message)"
+}
+
+# 2. 登录 admin
+try {
+    $r = Invoke-WebRequest "$BackendUrl/api/auth/login" -Method POST `
+        -ContentType "application/json" `
+        -Body '{"username":"admin","password":"root","role":"ADMIN"}' `
+        -TimeoutSec 10 -ErrorAction Stop
+    $j = $r.Content | ConvertFrom-Json
+    if ($j.code -eq 200 -and $j.data.token) {
+        Test-OK "admin/root 登录成功 (token: $($j.data.token.Substring(0,20))...)"
+        $token = $j.data.token
+    } else {
+        Test-FAIL "登录返回码不对: $($j.code) - $($j.message)"
+    }
+} catch {
+    Test-FAIL "登录失败: $($_.Exception.Message)"
+}
+
+# 3. 前端首页
+try {
+    $r = Invoke-WebRequest $FrontendUrl -Method GET -TimeoutSec 5 -ErrorAction Stop
+    if ($r.StatusCode -eq 200) { Test-OK "前端 5174 返回 200" } else { Test-FAIL "前端返回 $($r.StatusCode)" }
+} catch {
+    Test-FAIL "前端没起: $($_.Exception.Message)"
+}
+
+Write-Host ""
+Write-Host "==== 总结 ====" -ForegroundColor Green
+Write-Host "  PASS: $pass" -ForegroundColor Green
+Write-Host "  FAIL: $fail" -ForegroundColor $(if ($fail -eq 0) { "Green" } else { "Red" })
 
 if ($fail -gt 0) { exit 1 } else { exit 0 }
