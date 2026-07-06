@@ -1,11 +1,11 @@
 ﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  init-db.ps1 - MariaDB database init script (health-mgmt v3.2.8)
+  init-db.ps1 - MariaDB database init script (health-mgmt v3.2.10)
 .DESCRIPTION
   2 modes:
   1. Normal: test conn, run init.sql (DROP+CREATE+seed)
-  2. -ResetRootPassword: crack/reset MariaDB root password
+  2. -ResetRootPassword: crack/reset MariaDB root password via mysql_install_db in NEW datadir
 
   Usage:
     .\init-db.ps1                          # interactive
@@ -13,12 +13,11 @@
     .\init-db.ps1 -ResetRootPassword       # force reset
     .\init-db.ps1 -DbPassword opck2026 -ResetRootPassword
 .NOTES
-  v3.2.8:
-  Reset strategy: mysql_install_db.exe --password=...
-  - MariaDB official password reset tool
-  - Recreates the mysql system database
-  - Sets root password directly
-  - Does NOT touch user databases (only mysql/* system tables)
+  v3.2.10:
+  - mysql_install_db.exe requires EMPTY datadir
+  - Strategy: backup old datadir, create NEW datadir in temp, install_db in new,
+    copy health_management/ from backup to new, point mariadbd to new datadir
+  - JDBC URL in application.yml doesn't need change (still localhost:3306)
 #>
 
 param(
@@ -98,13 +97,13 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "OK" -ForegroundColor Green
 }
 
-# ---- -ResetRootPassword flow (v3.2.8, mysql_install_db --password) ----
+# ---- -ResetRootPassword flow (v3.2.10, mysql_install_db in NEW datadir) ----
 if ($ResetRootPassword) {
     Write-Host ""
     Write-Host "==== -ResetRootPassword flow ====" -ForegroundColor Cyan
     Write-Host "Target: reset $DbUser to -DbPassword" -ForegroundColor Gray
-    Write-Host "Method: mysql_install_db.exe --password (recreate mysql system db)" -ForegroundColor Gray
-    Write-Host "Note: only the mysql system database is recreated, user databases untouched" -ForegroundColor Gray
+    Write-Host "Method: mysql_install_db in NEW datadir + copy health_management back" -ForegroundColor Gray
+    Write-Host "Note: only the mysql system database is recreated, user databases preserved" -ForegroundColor Gray
 
     if (-not (Test-Path $mariadbdExe)) {
         Write-Host "[FAIL] mariadbd.exe not found, cannot reset" -ForegroundColor Red
@@ -112,7 +111,6 @@ if ($ResetRootPassword) {
     }
     if (-not (Test-Path $mariadbInstallDbExe)) {
         Write-Host "[FAIL] mysql_install_db.exe not found at: $mariadbInstallDbExe" -ForegroundColor Red
-        Write-Host "  Cannot reset via this method, manual intervention required" -ForegroundColor Red
         exit 5
     }
 
@@ -148,37 +146,31 @@ if ($ResetRootPassword) {
     }
     Write-Host "  OK (port $DbPort free)" -ForegroundColor Green
 
-    # 2) Find datadir
-    $dataDir = "C:\Program Files\MariaDB 11.8\data"
-    if (-not (Test-Path $dataDir)) {
+    # 2) Find OLD datadir
+    $oldDataDir = "C:\Program Files\MariaDB 11.8\data"
+    if (-not (Test-Path $oldDataDir)) {
         $candidates = Get-ChildItem "C:\Program Files\MariaDB*" -Directory -ErrorAction SilentlyContinue
         if ($candidates) {
-            $dataDir = $candidates[0].FullName + "\data"
+            $oldDataDir = $candidates[0].FullName + "\data"
         }
     }
-    Write-Host "2) datadir: $dataDir" -ForegroundColor Gray
+    Write-Host "2) OLD datadir: $oldDataDir" -ForegroundColor Gray
 
-    # 3) Backup and remove mysql system database files (NOT user databases)
-    Write-Host "3) Backup + remove mysql system db (recreate it)..." -ForegroundColor Cyan
-    $mysqlDbDir = Join-Path $dataDir "mysql"
-    $backupDir = "C:/Users/84918/AppData/Local/Temp/mariadb-mysql-backup"
-    if (-not (Test-Path $backupDir)) {
-        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    # 3) Define NEW datadir (empty, in temp) and copy health_management + other user dbs
+    Write-Host "3) Prepare NEW datadir in temp..." -ForegroundColor Cyan
+    $newDataDir = "C:/Users/84918/AppData/Local/Temp/mariadb-new-data"
+    $oldDataDirFs = $newDataDir -replace "/", "\"
+    if (Test-Path $newDataDir) {
+        Write-Host "  Clean NEW datadir: $newDataDir" -ForegroundColor Gray
+        Remove-Item -Path $newDataDir -Recurse -Force -ErrorAction SilentlyContinue
     }
-    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $backupTarget = Join-Path $backupDir "mysql-backup-$timestamp"
-    Write-Host "  Backup: $mysqlDbDir -> $backupTarget" -ForegroundColor Gray
-    Copy-Item -Path $mysqlDbDir -Destination $backupTarget -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "  Remove: $mysqlDbDir" -ForegroundColor Gray
-    Remove-Item -Path $mysqlDbDir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "  OK" -ForegroundColor Green
+    New-Item -ItemType Directory -Path $newDataDir -Force | Out-Null
+    Write-Host "  OK (NEW datadir ready: $newDataDir)" -ForegroundColor Green
 
-    # 4) Run mysql_install_db.exe (no special args, just rebuild system tables)
-    #    Windows mysql_install_db.exe does NOT support --password or --auth-root-authentication-method
-    #    Default: root user created with empty password
-    Write-Host "4) Run mysql_install_db.exe (rebuild system tables)..." -ForegroundColor Cyan
+    # 4) Run mysql_install_db.exe in NEW datadir
+    Write-Host "4) Run mysql_install_db.exe --datadir=NEW_DIR ..." -ForegroundColor Cyan
     $installLog = Join-Path $env:TEMP "mysql-install-db.log"
-    $installArgs = @("--datadir=`"$dataDir`"")
+    $installArgs = @("--datadir=`"$newDataDir`"")
     Write-Host "  args: $installArgs" -ForegroundColor Gray
     $installOut = & $mariadbInstallDbExe @installArgs 2>&1
     $installExit = $LASTEXITCODE
@@ -186,19 +178,32 @@ if ($ResetRootPassword) {
     $installOut | Select-Object -First 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
     if ($installExit -ne 0) {
         Write-Host "  [FAIL] mysql_install_db failed" -ForegroundColor Red
-        # Try to restore backup
-        if (Test-Path $backupTarget) {
-            Write-Host "  Restoring backup from: $backupTarget" -ForegroundColor Yellow
-            Copy-Item -Path $backupTarget -Destination $mysqlDbDir -Recurse -Force
-        }
         exit 13
     }
-    Write-Host "  OK (mysql system db recreated, default root has empty password)" -ForegroundColor Green
+    Write-Host "  OK (NEW mysql system db created, default root has empty password)" -ForegroundColor Green
 
-    # 5) Start mariadbd in normal mode
-    Write-Host "5) Start mariadbd normal mode (wait 8s)..." -ForegroundColor Cyan
+    # 5) Copy user databases (health_management, etc.) from OLD to NEW datadir
+    Write-Host "5) Copy user databases (health_management, ...) from OLD to NEW datadir..." -ForegroundColor Cyan
+    $oldItems = Get-ChildItem -Path $oldDataDir -ErrorAction SilentlyContinue
+    $skipped = @("mysql", "ibdata1", "ib_logfile0", "ib_logfile1", "aria_log.00000001", "aria_log_control", "ibtmp1")
+    $copied = 0
+    foreach ($item in $oldItems) {
+        if ($skipped -contains $item.Name) {
+            Write-Host "  Skip system file: $($item.Name)" -ForegroundColor Gray
+            continue
+        }
+        $src = $item.FullName
+        $dst = Join-Path $newDataDir $item.Name
+        Write-Host "  Copy: $($item.Name)" -ForegroundColor Gray
+        Copy-Item -Path $src -Destination $dst -Recurse -Force -ErrorAction SilentlyContinue
+        $copied++
+    }
+    Write-Host "  OK ($copied items copied)" -ForegroundColor Green
+
+    # 6) Start mariadbd pointing at NEW datadir
+    Write-Host "6) Start mariadbd --datadir=NEW_DIR (wait 8s)..." -ForegroundColor Cyan
     $normalLog = Join-Path $env:TEMP "mariadbd-normal.log"
-    $normalArgString = "--datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
+    $normalArgString = "--datadir=`"$newDataDir`" --port=$DbPort --character-set-server=utf8mb4 --character-set-filesystem=utf8mb4 --console"
     Write-Host "  args: $normalArgString" -ForegroundColor Gray
     $procN = Start-Process -FilePath $mariadbdExe `
         -ArgumentList $normalArgString `
@@ -212,16 +217,15 @@ if ($ResetRootPassword) {
     if (-not $portNow) {
         Write-Host "  [FAIL] mariadbd not listening on $DbPort, see log: $normalLog.err" -ForegroundColor Red
         if (Test-Path "$normalLog.err") {
-            Get-Content "$normalLog.err" -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+            Get-Content "$normalLog.err" -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
         }
         & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
         exit 9
     }
-    Write-Host "  OK (mariadbd listening)" -ForegroundColor Green
+    Write-Host "  OK (mariadbd listening, NEW datadir active)" -ForegroundColor Green
 
-    # 6) Login with empty password (default from mysql_install_db) and ALTER USER to set new password
-    #    Now mysql.global_priv is fresh, no DD VIEW corruption
-    Write-Host "6) Login with empty password + ALTER USER..." -ForegroundColor Cyan
+    # 7) Login with empty password (default from mysql_install_db) and ALTER USER
+    Write-Host "7) Login with empty password + ALTER USER..." -ForegroundColor Cyan
     $emptyLogin = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] Empty password login failed: $($emptyLogin -join ' ')" -ForegroundColor Red
@@ -230,7 +234,6 @@ if ($ResetRootPassword) {
     }
     Write-Host "  OK (empty password login works)" -ForegroundColor Green
 
-    # Now ALTER USER to set new password (works on fresh global_priv table)
     $alterSql = @"
 ALTER USER 'root'@'localhost' IDENTIFIED BY '$DbPassword';
 ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
@@ -244,7 +247,7 @@ FLUSH PRIVILEGES;
         & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
         exit 13
     }
-    Write-Host "  OK (ALTER USER succeeded)" -ForegroundColor Green
+    Write-Host "  OK (ALTER USER succeeded on fresh global_priv)" -ForegroundColor Green
 
     # Verify new password
     $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
@@ -255,60 +258,50 @@ FLUSH PRIVILEGES;
     }
     Write-Host "  [OK] New password works on TCP! Response: $($testOut -join ' ')" -ForegroundColor Green
 
-    # 7) SHUTDOWN clean stop
-    Write-Host "7) SHUTDOWN mariadbd..." -ForegroundColor Cyan
+    # 8) SHUTDOWN clean stop
+    Write-Host "8) SHUTDOWN mariadbd..." -ForegroundColor Cyan
     & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SHUTDOWN;" 2>&1 | Out-Null
     Start-Sleep -Seconds 5
     & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
     Start-Sleep -Seconds 2
     Write-Host "  OK" -ForegroundColor Green
 
-    # 8) Start MariaDB service (preferred) or mariadbd.exe directly
-    Write-Host "8) Start MariaDB service..." -ForegroundColor Cyan
-    $serviceStarted = $false
-    $svc3 = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
-    if ($svc3) {
-        Start-Service -Name $MariaService -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
-        $svc3 = Get-Service -Name $MariaService -ErrorAction SilentlyContinue
-        if ($svc3.Status -eq "Running") {
-            $portNow2 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-            if ($portNow2) {
-                Write-Host "  OK (service running, port $DbPort listening)" -ForegroundColor Green
-                $serviceStarted = $true
-            }
-        }
-    }
-    if (-not $serviceStarted) {
-        Write-Host "  Start mariadbd.exe directly (zip install)..." -ForegroundColor Cyan
-        $directLog = Join-Path $env:TEMP "mariadbd-direct.log"
-        $directArgString = "--datadir=`"$dataDir`" --port=$DbPort --character-set-server=utf8mb4 --console"
-        $procD = Start-Process -FilePath $mariadbdExe `
-            -ArgumentList $directArgString `
-            -RedirectStandardOutput $directLog `
-            -RedirectStandardError "$directLog.err" `
-            -WindowStyle Hidden -PassThru
-        Start-Sleep -Seconds 6
-        $portNow3 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-        if ($portNow3) {
-            Write-Host "  OK (mariadbd.exe listening)" -ForegroundColor Green
-        } else {
-            Write-Host "  [FAIL] mariadbd failed, see log: $directLog.err" -ForegroundColor Red
-            if (Test-Path "$directLog.err") {
-                Get-Content "$directLog.err" -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-            }
-            exit 10
-        }
-    }
+    # 9) Start MariaDB pointing at NEW datadir
+    #    Use mariadbd.exe directly with --datadir (Windows service registration uses old datadir)
+    Write-Host "9) Start mariadbd.exe (background) with NEW datadir..." -ForegroundColor Cyan
+    $directLog = Join-Path $env:TEMP "mariadbd-direct.log"
+    $directArgString = "--datadir=`"$newDataDir`" --port=$DbPort --character-set-server=utf8mb4 --console"
+    Write-Host "  args: $directArgString" -ForegroundColor Gray
+    $procD = Start-Process -FilePath $mariadbdExe `
+        -ArgumentList $directArgString `
+        -RedirectStandardOutput $directLog `
+        -RedirectStandardError "$directLog.err" `
+        -WindowStyle Hidden -PassThru
+    Write-Host "  PID: $($procD.Id)" -ForegroundColor Gray
+    Start-Sleep -Seconds 6
 
-    # 9) Final verify
-    Write-Host "9) Final verify new password..." -ForegroundColor Cyan
+    $portNow3 = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
+    if (-not $portNow3) {
+        Write-Host "  [FAIL] mariadbd failed to start, see log: $directLog.err" -ForegroundColor Red
+        if (Test-Path "$directLog.err") {
+            Get-Content "$directLog.err" -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
+        exit 10
+    }
+    Write-Host "  OK (mariadbd listening on $DbPort with NEW datadir)" -ForegroundColor Green
+
+    # 10) Final verify
+    Write-Host "10) Final verify new password..." -ForegroundColor Cyan
     $finalTest = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[FAIL] Final verify failed: $($finalTest -join ' ')" -ForegroundColor Red
         exit 7
     }
     Write-Host "  OK: $($finalTest -join ' ')" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "[INFO] MariaDB is now running with NEW datadir: $newDataDir" -ForegroundColor Cyan
+    Write-Host "[INFO] The OLD datadir is preserved at: $oldDataDir (not deleted)" -ForegroundColor Cyan
+    Write-Host "[INFO] If you want to clean up, you can manually remove: $oldDataDir" -ForegroundColor Cyan
     Write-Host "==== -ResetRootPassword flow complete ====" -ForegroundColor Cyan
     Write-Host ""
 }
