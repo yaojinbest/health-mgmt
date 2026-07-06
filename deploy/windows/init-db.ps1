@@ -280,9 +280,9 @@ if ($ResetRootPassword) {
     $initFixSql = @"
 DELETE FROM mysql.global_priv WHERE User='root';
 INSERT INTO mysql.global_priv (Host, User, Priv) VALUES
-  ('localhost', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'version_id', 110806, 'password_last_changed', UNIX_TIMESTAMP())),
-  ('127.0.0.1', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'version_id', 110806, 'password_last_changed', UNIX_TIMESTAMP())),
-  ('::1', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'version_id', 110806, 'password_last_changed', UNIX_TIMESTAMP()));
+  ('localhost', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW()))),
+  ('127.0.0.1', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW()))),
+  ('::1', 'root', JSON_OBJECT('access', $accessBits, 'plugin', 'mysql_native_password', 'authentication_string', '$newHash', 'is_role', 'N', 'default_role', '', 'max_connections', 0, 'max_user_connections', 0, 'max_statement_time', 0.0, 'version_id', 110803, 'password_last_changed', UNIX_TIMESTAMP(NOW())));
 FLUSH PRIVILEGES;
 "@
     $initFixPath = Join-Path $newDataDir "init-fix.sql"
