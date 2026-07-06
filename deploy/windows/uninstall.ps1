@@ -1,12 +1,12 @@
 ﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  uninstall.ps1 - 完全卸载健康管理系统 (杀进程 + 删库 + 删 jar)
+  uninstall.ps1 - 完全卸载健康管理系统 (v4.1)
 .NOTES
-  v4.0
-  - 不会卸载 MariaDB (那是另一个软件)
-  - 不会删 source code (deploy\..\..\src, frontend-pc\src 等)
-  - 只会清 runtime artifacts (jar, dist build, 进程, 数据库)
+  v4.1 改进:
+    - ✅ 自动找 mysql.exe (兼容 mariadb install 路径变化)
+    - ✅ Get-Process + Stop-Process 替 taskkill
+    - ✅ 彩色状态输出
 #>
 
 [CmdletBinding()]
@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  健康管理系统 完全卸载" -ForegroundColor Cyan
+Write-Host "  健康管理系统 完全卸载 (v4.1)" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -50,8 +50,15 @@ if ($KeepDatabase) {
         if ($found) { $mysqlExe = $found.FullName; break }
     }
     if ($mysqlExe) {
-        & $mysqlExe -h 127.0.0.1 -P 3306 -u root -popck2026 --default-character-set=utf8mb4 -e "DROP DATABASE IF EXISTS health_management;" 2>&1 | Out-Null
-        Write-Host "  OK (DROP DATABASE IF EXISTS health_management)" -ForegroundColor Green
+        # 关键: -h "127.0.0.1" 加空格 + 双引号 + 立即快照 $LASTEXITCODE
+        Get-Content -Path "dummy" -ErrorAction SilentlyContinue | Out-Null   # 占位
+        & $mysqlExe -h "127.0.0.1" -P 3306 -u root -popck2026 --default-character-set=utf8mb4 -e "DROP DATABASE IF EXISTS health_management;" 2>&1 | Out-Null
+        $dropExit = $LASTEXITCODE
+        if ($dropExit -ne 0) {
+            Write-Host "  [WARN] DROP 失败 (exit $dropExit), 继续" -ForegroundColor Yellow
+        } else {
+            Write-Host "  OK (DROP DATABASE IF EXISTS health_management)" -ForegroundColor Green
+        }
     } else {
         Write-Host "  [SKIP] 找不到 mysql.exe" -ForegroundColor Yellow
     }
@@ -68,7 +75,7 @@ if (Test-Path $jarPath) {
     Write-Host "  OK (jar 不存在)" -ForegroundColor Green
 }
 
-# 4. 删 frontend dist build
+# 4. 删 frontend dist
 Write-Host ""
 Write-Host "[4/4] 删 frontend dist build ..." -ForegroundColor Cyan
 $distPath = Join-Path (Resolve-Path "..\..") "frontend-pc\dist"
