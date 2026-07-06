@@ -251,12 +251,13 @@ if ($ResetRootPassword) {
     Write-Host "3) 连 mysql (免密码) 改密码..." -ForegroundColor Cyan
     $resetSql = @"
 FLUSH PRIVILEGES;
-ALTER USER '$DbUser'@'localhost' IDENTIFIED BY '$DbPassword';
-ALTER USER '$DbUser'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
-ALTER USER '$DbUser'@'::1' IDENTIFIED BY '$DbPassword';
+-- MariaDB 11.x 在 --skip-grant-tables 下仍验密码, 改用直接 UPDATE 写 mysql.user 表
+UPDATE mysql.user SET password=PASSWORD('$DbPassword') WHERE user='$DbUser';
+UPDATE mysql.user SET plugin='mysql_native_password' WHERE user='$DbUser' AND (plugin='mysql_native_password' OR plugin='' OR plugin IS NULL);
 FLUSH PRIVILEGES;
 FLUSH HOSTS;
 FLUSH LOGS;
+SELECT 'PASSWORD_UPDATED' as status;
 "@
     # 验证一下连接能进, 不要求真进库 (skip-grant 模式, 任何密码都能进)
     $testReset = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SELECT 1" 2>&1
