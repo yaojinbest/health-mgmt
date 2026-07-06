@@ -142,10 +142,15 @@ Write-Host "目标密码: ******** (留 -DbPassword 覆盖)" -ForegroundColor Gr
 Write-Host "测试数据库连接 $DbHost`:$DbPort ..." -ForegroundColor Cyan
 $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
 if ($LASTEXITCODE -ne 0) {
-    # 1045 = Access denied → 自动走重置
+    # 1045 = Access denied, 10061 = 服务没起 → 都走重置
     if ($testOut -match "1045" -or $testOut -match "Access denied") {
         if (-not $ResetRootPassword) {
             Write-Host "[WARN] Access denied. 自动启用 -ResetRootPassword 流程..." -ForegroundColor Yellow
+            $ResetRootPassword = $true
+        }
+    } elseif ($testOut -match "10061" -or $testOut -match "Can't connect" -or $testOut -match "Connection refused") {
+        if (-not $ResetRootPassword) {
+            Write-Host "[WARN] 服务没起 (10061), 自动启用 -ResetRootPassword 流程 (会启 mariadbd)..." -ForegroundColor Yellow
             $ResetRootPassword = $true
         }
     } else {
