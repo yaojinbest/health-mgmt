@@ -173,12 +173,14 @@ if ($ResetRootPassword) {
     Remove-Item -Path $mysqlDbDir -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "  OK" -ForegroundColor Green
 
-    # 4) Run mysql_install_db.exe to recreate system tables
-    Write-Host "4) Run mysql_install_db.exe --password=... ..." -ForegroundColor Cyan
+    # 4) Run mysql_install_db.exe (no special args, just rebuild system tables)
+    #    Windows mysql_install_db.exe does NOT support --password or --auth-root-authentication-method
+    #    Default: root user created with empty password
+    Write-Host "4) Run mysql_install_db.exe (rebuild system tables)..." -ForegroundColor Cyan
     $installLog = Join-Path $env:TEMP "mysql-install-db.log"
-    $installArgs = "--datadir=`"$dataDir`" --password=`"$DbPassword`" --auth-root-authentication-method=normal"
+    $installArgs = @("--datadir=`"$dataDir`"")
     Write-Host "  args: $installArgs" -ForegroundColor Gray
-    $installOut = & $mariadbInstallDbExe $installArgs.Split(" ") 2>&1
+    $installOut = & $mariadbInstallDbExe @installArgs 2>&1
     $installExit = $LASTEXITCODE
     Write-Host "  exit code: $installExit" -ForegroundColor Gray
     $installOut | Select-Object -First 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
@@ -191,7 +193,7 @@ if ($ResetRootPassword) {
         }
         exit 13
     }
-    Write-Host "  OK (mysql system db recreated)" -ForegroundColor Green
+    Write-Host "  OK (mysql system db recreated, default root has empty password)" -ForegroundColor Green
 
     # 5) Start mariadbd in normal mode
     Write-Host "5) Start mariadbd normal mode (wait 8s)..." -ForegroundColor Cyan
@@ -217,11 +219,37 @@ if ($ResetRootPassword) {
     }
     Write-Host "  OK (mariadbd listening)" -ForegroundColor Green
 
-    # 6) Verify new password + ensure root can access from TCP
-    Write-Host "6) Verify new password + TCP access..." -ForegroundColor Cyan
+    # 6) Login with empty password (default from mysql_install_db) and ALTER USER to set new password
+    #    Now mysql.global_priv is fresh, no DD VIEW corruption
+    Write-Host "6) Login with empty password + ALTER USER..." -ForegroundColor Cyan
+    $emptyLogin = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [FAIL] Empty password login failed: $($emptyLogin -join ' ')" -ForegroundColor Red
+        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
+        exit 7
+    }
+    Write-Host "  OK (empty password login works)" -ForegroundColor Green
+
+    # Now ALTER USER to set new password (works on fresh global_priv table)
+    $alterSql = @"
+ALTER USER 'root'@'localhost' IDENTIFIED BY '$DbPassword';
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '$DbPassword';
+ALTER USER 'root'@'::1' IDENTIFIED BY '$DbPassword';
+FLUSH PRIVILEGES;
+"@
+    Write-Host "  SQL: $alterSql" -ForegroundColor Gray
+    $alterOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser --default-character-set=utf8mb4 -e $alterSql 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [FAIL] ALTER USER failed: $($alterOut -join ' ')" -ForegroundColor Red
+        & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
+        exit 13
+    }
+    Write-Host "  OK (ALTER USER succeeded)" -ForegroundColor Green
+
+    # Verify new password
     $testOut = & $mysqlExe -h $DbHost -P "$DbPort" -u $DbUser -p$DbPassword --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAIL] Verify failed: $($testOut -join ' ')" -ForegroundColor Red
+        Write-Host "  [FAIL] New password verify failed: $($testOut -join ' ')" -ForegroundColor Red
         & taskkill.exe /F /IM mariadbd.exe /T 2>$null | Out-Null
         exit 7
     }
