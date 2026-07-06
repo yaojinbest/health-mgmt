@@ -49,7 +49,7 @@ param(
     [string]$DbPassword = "opck2026",
     [int]$BackendPort = 8090,
     [int]$FrontendPort = 5173,
-    [string]$ProjectRoot = "..\..",
+    [string]$ProjectRoot = "",
     [switch]$AutoResetRoot  # 密码错自动跑 5 步 reset
 )
 
@@ -61,17 +61,75 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ============================================================
-# 1. 路径定位 (用 Join-Path 避免引号问题)
+# 1. 路径定位 (v4.1.1 自动探测 ProjectRoot)
 # ============================================================
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ResolvedRoot = (Resolve-Path $ProjectRoot).Path
+
+# 关键修复 v4.1.1: 自动探测 ProjectRoot, 在 4 个候选位置找 sql\init.sql
+# 解决: 进哥从 D:\BaiduNetdiskDownload\health-mgmt-deploy-v4.1\deploy\windows\ 跑时
+# `..\..` 被 PS 5.1 解析成 D:\, 找不到 jar/sql/dist
+function Find-ProjectRoot {
+    param([string]$ScriptDirPath)
+    $candidates = @(
+        (Get-Location).Path,                                              # cwd
+        $ScriptDirPath,                                                   # scripts dir
+        (Split-Path -Parent $ScriptDirPath),                              # 上一层
+        (Split-Path -Parent (Split-Path -Parent $ScriptDirPath))          # 上两层
+    )
+    foreach ($p in $candidates) {
+        $try = $p
+        try {
+            $resolved = (Resolve-Path $try -ErrorAction Stop).Path
+            $test = Join-Path $resolved "sql\init.sql"
+            if (Test-Path $test) {
+                return $resolved
+            }
+        } catch {}
+    }
+    return $null
+}
+
+$ResolvedRoot = Find-ProjectRoot -ScriptDirPath $ScriptDir
+if (-not $ResolvedRoot) {
+    if ([string]::IsNullOrEmpty($ProjectRoot)) {
+        Write-Host "  [FAIL] 自动探测 ProjectRoot 失败, sql\init.sql 不在常见位置" -ForegroundColor Red
+        Write-Host "  请用 -ProjectRoot D:\path\to\health-mgmt 显式指定" -ForegroundColor Yellow
+        exit 1
+    }
+    $ResolvedRoot = (Resolve-Path $ProjectRoot).Path
+}
+
 $JarPath = Join-Path $ResolvedRoot "target\health-management-1.0.0.jar"
 $DistPath = Join-Path $ResolvedRoot "frontend-pc\dist"
 $InitSql = Join-Path $ResolvedRoot "sql\init.sql"
 $ResetSql = Join-Path $ScriptDir "reset-root-simple.sql"
 
+# v4.1.1 fallback: 在 ResolvedRoot 上级找 jar (zip 顶层放 jar 时)
+if (-not (Test-Path $JarPath)) {
+    $JarPathAlt = Join-Path (Split-Path -Parent $ResolvedRoot) "health-management-1.0.0.jar"
+    if (Test-Path $JarPathAlt) {
+        Write-Host "  [INFO] 从上层目录找 jar: $JarPathAlt" -ForegroundColor Yellow
+        $JarPath = $JarPathAlt
+        # 上层目录同时是实际 ProjectRoot (有 init.sql)
+        $altRoot = Split-Path -Parent $ResolvedRoot
+        if (Test-Path (Join-Path $altRoot "sql\init.sql")) {
+            $ResolvedRoot = $altRoot
+            $InitSql = Join-Path $ResolvedRoot "sql\init.sql"
+        }
+    }
+}
+# 同 fallback: init.sql 也可能在 ResolvedRoot 上层
+if (-not (Test-Path $InitSql)) {
+    $InitSqlAlt = Join-Path (Split-Path -Parent $ResolvedRoot) "init.sql"
+    if (Test-Path $InitSqlAlt) {
+        Write-Host "  [INFO] 从上层目录找 init.sql: $InitSqlAlt" -ForegroundColor Yellow
+        $InitSql = $InitSqlAlt
+        $ResolvedRoot = Split-Path -Parent $ResolvedRoot
+    }
+}
+
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  健康管理系统 一键部署 v4.1" -ForegroundColor Cyan
+Write-Host "  健康管理系统 一键部署 v4.1.1" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Project root: $ResolvedRoot" -ForegroundColor Gray
@@ -95,6 +153,25 @@ function Test-Bom {
     if (-not (Test-Path $Path)) { return $false }
     $bytes = [System.IO.File]::ReadAllBytes($Path)
     return ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+}
+
+# v4.1.1 关键修复: Test-MysqlAuth 用 array args + try/catch + 2>$null
+# 解决进哥 22:51 报错: -p$Pwd 当 Pwd 为空时拼成 -p, mysql 误判
+# 同时解决 RemoteException (mysql.exe stderr) 中断 ps 流程
+function Test-MysqlAuth {
+    param([string]$Pwd)
+    try {
+        if ([string]::IsNullOrEmpty($Pwd)) {
+            # 空密码: 不要 -p 参数
+            $argList = @("-h", "127.0.0.1", "-P", "$DbPort", "-u", $DbUser, "--default-character-set=utf8mb4", "-e", "SELECT VERSION();")
+        } else {
+            $argList = @("-h", "127.0.0.1", "-P", "$DbPort", "-u", $DbUser, "-p$Pwd", "--default-character-set=utf8mb4", "-e", "SELECT VERSION();")
+        }
+        & $mysqlExe $argList 2>$null 3>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
 }
 
 # ============================================================
@@ -193,7 +270,7 @@ Write-Host "  OK" -ForegroundColor Green
 # ============================================================
 Write-Host "[5/9] 启动 MariaDB ..." -ForegroundColor Cyan
 
-# 自动探测 datadir (my.ini 路径)
+# 自动探测 datadir (my.ini 路径) - v4.1.1 修复 Select-String 输出
 $mariadbDataDir = ""
 $myIni = Get-ChildItem -Path (Split-Path -Parent $mariadbBin) -Recurse -Filter "my.ini" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($myIni) {
@@ -201,7 +278,28 @@ if ($myIni) {
     # 从 my.ini 读 datadir
     $datadirLine = Select-String -Path $myIni.FullName -Pattern "^datadir\s*=" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($datadirLine) {
-        $mariadbDataDir = ($datadirLine -replace "^datadir\s*=\s*", "").Trim()
+        # v4.1.1 关键修复: Select-String 输出格式是 "filename:line:content"
+        # 例: "C:\Program Files\MariaDB 11.8\data\my.ini:2:datadir=C:/Program Files/MariaDB 11.8/data"
+        # 必须先 strip filename:line: 前缀
+        $rawLine = $datadirLine.ToString()
+        $datadirValue = ""
+        # 方法 1: 找 ":datadir=" 这个关键标识
+        $idx = $rawLine.IndexOf("datadir=", [System.StringComparison]::OrdinalIgnoreCase)
+        if ($idx -ge 0) {
+            $datadirValue = $rawLine.Substring($idx + "datadir=".Length).Trim()
+        }
+        # 方法 2 (fallback): 用 split 找冒号后面内容
+        if (-not $datadirValue) {
+            $parts = $rawLine -split ':', 3
+            if ($parts.Length -ge 3) {
+                $datadirValue = $parts[2].Trim()
+            }
+        }
+        # 去掉行尾注释 (# 或 ;)
+        $datadirValue = ($datadirValue -replace '\s*[#;].*$', '').Trim()
+        # 把 Unix 路径分隔符转 Windows (C:/Program Files/ -> C:\Program Files\)
+        $datadirValue = $datadirValue -replace '/', '\'
+        $mariadbDataDir = $datadirValue
         Write-Host "  探测 datadir: $mariadbDataDir" -ForegroundColor Gray
     }
 }
@@ -244,13 +342,8 @@ if ($svc -and $svc.Status -eq "Running") {
 # 8. Step 6: 自动检测 root 密码 (空 / opck2026 / 自定义)
 # ============================================================
 Write-Host "[6/9] 探测 root 密码 ..." -ForegroundColor Cyan
-
-# 关键修复: -h "127.0.0.1" 加空格 + 双引号 (避免 PS 5.1 截断为 '127')
-function Test-MysqlAuth {
-    param([string]$Pwd)
-    & $mysqlExe -h "127.0.0.1" -P "$DbPort" -u $DbUser -p$Pwd --default-character-set=utf8mb4 -e "SELECT VERSION();" 2>&1 | Out-Null
-    return $LASTEXITCODE -eq 0
-}
+# v4.1.1: Test-MysqlAuth 已上移到工具函数区 (array args + try/catch)
+# 测试顺序: socket (空密码从 127.0.0.1 大概率空 OK) -> 空 / opck2026
 
 $detectedPwd = $null
 $testPwds = @("", $DbPassword)
@@ -310,12 +403,24 @@ if (-not (Test-Bom -Path $InitSql)) {
     }
 }
 
+# 关键 v4.1.1: 用 array args 替代字符串拼 (-p$pwd 当 pwd 为空会出错)
 # 关键: Get-Content -Encoding UTF8 (避免 GBK 解码乱码)
-$mysqlOut = Get-Content $InitSql -Encoding UTF8 | & $mysqlExe -h "127.0.0.1" -P "$DbPort" -u $DbUser -p$detectedPwd --default-character-set=utf8mb4 2>&1
-$mysqlExit = $LASTEXITCODE   # ← 立即快照, 后续不丢
+if ([string]::IsNullOrEmpty($detectedPwd)) {
+    # 空密码不传 -p
+    $initArgList = @("-h", "127.0.0.1", "-P", "$DbPort", "-u", $DbUser, "--default-character-set=utf8mb4")
+} else {
+    $initArgList = @("-h", "127.0.0.1", "-P", "$DbPort", "-u", $DbUser, "-p$detectedPwd", "--default-character-set=utf8mb4")
+}
+try {
+    Get-Content $InitSql -Encoding UTF8 | & $mysqlExe $initArgList 2>$null 3>$null | Out-Null
+    $mysqlExit = $LASTEXITCODE   # ← 立即快照, 后续不丢
+} catch {
+    $mysqlExit = 1
+    Write-Host "  [WARN] init.sql 调用抛 RemoteException (PowerShell 5.1 已知问题)" -ForegroundColor Yellow
+}
 if ($mysqlExit -ne 0) {
-    Write-Host "  [FAIL] init.sql 跑失败:" -ForegroundColor Red
-    $mysqlOut | Select-Object -Last 10 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    Write-Host "  [FAIL] init.sql 跑失败 (exit $mysqlExit)" -ForegroundColor Red
+    Write-Host "  可能原因: 数据库密码不对 / init.sql 语法错 / 网络不通" -ForegroundColor Yellow
     exit 7
 }
 Write-Host "  OK (DROP + CREATE + 15 表 + 种子数据)" -ForegroundColor Green
