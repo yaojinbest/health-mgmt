@@ -44,7 +44,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ResetSql = Join-Path $ScriptDir "reset-root-simple.sql"
 
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  MariaDB root 密码自动 reset (v4.1)" -ForegroundColor Cyan
+Write-Host "  MariaDB root 密码自动 reset (v4.1.2)" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "MariaDB bin:   $MariadbBin" -ForegroundColor Gray
@@ -73,8 +73,9 @@ if ($mariadbProcs) {
     Write-Host "  OK (没 mariadbd 进程)" -ForegroundColor Green
 }
 Start-Sleep -Seconds 3
-$portBusy = Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue
-if ($portBusy) {
+# v4.1.2 关键修复: Get-NetTCPConnection 返回对象数组, 用 @() 包装避免单元素比较
+$portBusy = @(Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue)
+if ($portBusy.Count -gt 0) {
     Write-Host "  [WARN] port $DbPort 还被占, 等 5 秒" -ForegroundColor Yellow
     Start-Sleep -Seconds 5
 }
@@ -91,10 +92,13 @@ Write-Host "  args: $argStr" -ForegroundColor Gray
 Start-Process -FilePath $mariadbdExe -ArgumentList $argStr -RedirectStandardOutput "$env:TEMP\mariadbd-reset.log" -RedirectStandardError "$env:TEMP\mariadbd-reset.log.err"
 
 # 等 ready for connections
+# v4.1.2 关键修复: Test-NetTCPConnection 是 PowerShell 6+ cmdlet, PS 5.1 没有！
+# 改用 Get-NetTCPConnection 判断
 $ready = $false
 for ($i = 1; $i -le 30; $i++) {
     Start-Sleep -Seconds 1
-    if (Test-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue) {
+    $conn = @(Get-NetTCPConnection -LocalPort $DbPort -State Listen -ErrorAction SilentlyContinue)
+    if ($conn.Count -gt 0) {
         $ready = $true
         Write-Host "  OK (ready for connections, ${i}s)" -ForegroundColor Green
         break

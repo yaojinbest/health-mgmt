@@ -12,8 +12,9 @@ param()
 
 function Get-PortStatus {
     param([int]$Port)
-    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    if ($conn) {
+    # v4.1.2 fix: @() 包装避免单元素 wrapper 折叠成布尔
+    $conn = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if ($conn.Count -gt 0) {
         $pids = ($conn.OwningProcess | Select-Object -Unique) -join ", "
         return @{ Status="LISTENING"; Pids=$pids }
     } else {
