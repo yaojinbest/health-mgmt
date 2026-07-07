@@ -200,7 +200,7 @@ else
 fi
 
 # ----- 4. 启 frontend -----
-echo "[4/4] 启 frontend (python http.server) ..."
+echo "[4/4] 启 frontend (SPA-aware python server) ..."
 DIST_DIR="$ROOT_DIR/frontend-pc/dist"
 if [ ! -d "$DIST_DIR" ]; then
     echo "[FAIL] 找不到 $DIST_DIR"
@@ -208,9 +208,10 @@ if [ ! -d "$DIST_DIR" ]; then
 fi
 
 pkill -f "http.server $FRONTEND_PORT" 2>/dev/null || true
+pkill -f "spa-server.py $FRONTEND_PORT" 2>/dev/null || true
 sleep 1
 
-nohup python3 -m http.server "$FRONTEND_PORT" --directory "$DIST_DIR" \
+nohup python3 "$SCRIPT_DIR/bin/spa-server.py" "$FRONTEND_PORT" "$DIST_DIR" \
     > "$LOG_DIR/frontend.log" 2>&1 &
 sleep 2
 
