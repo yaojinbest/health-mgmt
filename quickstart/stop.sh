@@ -7,8 +7,9 @@ set -euo pipefail
 echo "[stop] 杀 backend (java jar) ..."
 pkill -f "health-management-1.0.0.jar" 2>/dev/null || true
 
-echo "[stop] 杀 frontend (python http.server) ..."
+echo "[stop] 杀 frontend (python http.server / SPA) ..."
 pkill -f "http.server 5173" 2>/dev/null || true
+pkill -f "spa-server.py 5173" 2>/dev/null || true
 
 echo "[stop] 杀 mariadbd (sandbox quickstart) ..."
 pkill -f "/usr/sbin/mariadbd\|mariadbd " 2>/dev/null || true
